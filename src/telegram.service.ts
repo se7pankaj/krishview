@@ -4,7 +4,7 @@ import axios from 'axios';
 
 @Injectable()
 export class TelegramService {
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private configService: ConfigService) {}
 
   async sendMessage(message: string) {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');

@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
@@ -8,6 +9,7 @@ import { TelegramService } from './telegram.service';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: path.resolve(__dirname, '../.env'),
     }),
   ],
   controllers: [AppController],
