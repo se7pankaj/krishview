@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KrishView — Live Trading Dashboard</title>
+<style>
+  :root {
+    --bg:       #0d1117;
+    --surface:  #161b22;
+    --border:   #30363d;
+    --text:     #c9d1d9;
+    --muted:    #8b949e;
+    --green:    #00ff88;
+    --red:      #ff4444;
+    --yellow:   #f0c040;
+    --blue:     #58a6ff;
+    --purple:   #bc8cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, monospace; font-size: 13px; }
+
+  /* ── Header ── */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .header h1 { font-size: 18px; color: var(--green); letter-spacing: 1px; }
+  .header h1 span { color: var(--text); font-weight: 300; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
+  .status-dot.offline { background: var(--red); animation: none; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .last-update { color: var(--muted); font-size: 11px; }
+
+  /* ── Layout ── */
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 24px; }
+  .grid-2 { grid-template-columns: repeat(2, 1fr); }
+  .grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .card-title { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+  .card-value { font-size: 26px; font-weight: 700; color: var(--text); }
+  .card-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .neutral { color: var(--yellow); }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  td { padding: 8px 10px; border-bottom: 1px solid #21262d; font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: rgba(255,255,255,0.03); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; }
+  .badge-buy  { background: rgba(0,255,136,0.15); color: var(--green); }
+  .badge-sell { background: rgba(255,68,68,0.15);  color: var(--red); }
+  .badge-pending  { background: rgba(240,192,64,0.15); color: var(--yellow); }
+  .badge-approved { background: rgba(0,255,136,0.15);  color: var(--green); }
+  .badge-rejected { background: rgba(255,68,68,0.15);  color: var(--red); }
+
+  /* ── SMC State ── */
+  .smc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .smc-item { background: #0d1117; border-radius: 6px; padding: 10px; }
+  .smc-label { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+  .smc-val { font-size: 15px; font-weight: 600; margin-top: 4px; }
+
+  /* ── News bar ── */
+  .news-list { display: flex; flex-direction: column; gap: 6px; }
+  .news-item { background: #0d1117; border-radius: 6px; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+  .news-title { font-size: 12px; }
+  .news-time { font-size: 11px; color: var(--yellow); white-space: nowrap; margin-left: 12px; }
+  .news-time.soon { color: var(--red); }
+
+  /* ── Section labels ── */
+  .section { padding: 8px 24px 0; }
+  .section-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+
+  /* ── Approval pill ── */
+  .approval-row td:last-child { text-align: right; }
+  .approve-btn { background: rgba(0,255,136,0.15); color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
+  .approve-btn:hover { background: rgba(0,255,136,0.3); }
+
+  /* ── Empty state ── */
+  .empty { color: var(--muted); text-align: center; padding: 24px; font-size: 12px; }
+
+  /* ── Confidence bar ── */
+  .conf-bar { background: #21262d; border-radius: 3px; height: 4px; margin-top: 6px; }
+  .conf-fill { height: 4px; border-radius: 3px; background: var(--green); transition: width 0.5s; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>Krish<span>View</span> &nbsp;🤖&nbsp; Trading Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:16px">
+    <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connecting...</span></span>
+    <span class="last-update" id="lastUpdate"></span>
+  </div>
+</div>
+
+<!-- Account Summary -->
+<div class="grid" id="summaryGrid">
+  <div class="card"><div class="card-title">Balance</div><div class="card-value" id="balance">—</div><div class="card-sub">Account equity: <span id="equity">—</span></div></div>
+  <div class="card"><div class="card-title">Daily PnL</div><div class="card-value" id="dailyPnl">—</div><div class="card-sub"><span id="winRate">—</span>% win rate today</div></div>
+  <div class="card"><div class="card-title">Open Trades</div><div class="card-value" id="openCount">—</div><div class="card-sub">Floating: <span id="floatPnl">—</span></div></div>
+  <div class="card"><div class="card-title">Today's Trades</div><div class="card-value" id="todayTotal">—</div><div class="card-sub"><span id="wins">—</span>W / <span id="losses">—</span>L</div></div>
+</div>
+
+<!-- SMC State -->
+<div class="section"><div class="section-title">Live SMC State</div></div>
+<div style="padding:12px 24px 0">
+  <div class="card">
+    <div class="smc-grid" id="smcGrid">
+      <div class="smc-item"><div class="smc-label">HTF Bias</div><div class="smc-val" id="smcBias">—</div></div>
+      <div class="smc-item"><div class="smc-label">Zone</div><div class="smc-val" id="smcZone">—</div></div>
+      <div class="smc-item"><div class="smc-label">Confidence</div><div class="smc-val" id="smcConf">—</div><div class="conf-bar"><div class="conf-fill" id="confFill" style="width:0%"></div></div></div>
+      <div class="smc-item"><div class="smc-label">Order Blocks</div><div class="smc-val" id="smcOB">—</div></div>
+      <div class="smc-item"><div class="smc-label">FVGs</div><div class="smc-val" id="smcFVG">—</div></div>
+      <div class="smc-item"><div class="smc-label">Direction</div><div class="smc-val" id="smcDir">—</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- Pending Approvals -->
+<div class="section" style="margin-top:16px"><div class="section-title">Pending Approvals ⏳</div></div>
+<div style="padding:12px 24px 0" id="approvalsContainer">
+  <div class="card"><p class="empty" style="padding:16px 0">No pending approvals</p></div>
+</div>
+
+<!-- Open Positions -->
+<div class="section" style="margin-top:16px"><div class="section-title">Open Positions</div></div>
+<div style="padding:12px 24px 0">
+  <div class="card">
+    <table>
+      <thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lots</th><th>Open Price</th><th>SL</th><th>TP</th><th>Profit</th></tr></thead>
+      <tbody id="positionsTable"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Recent Trades -->
+<div class="section" style="margin-top:16px"><div class="section-title">Recent Trades</div></div>
+<div style="padding:12px 24px 0">
+  <div class="card">
+    <table>
+      <thead><tr><th>Ticket</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>RR</th><th>Confidence</th><th>Status</th></tr></thead>
+      <tbody id="tradesTable"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Upcoming News -->
+<div class="section" style="margin-top:16px"><div class="section-title">Upcoming High-Impact News 📰</div></div>
+<div style="padding:12px 24px 20px">
+  <div class="card">
+    <div class="news-list" id="newsList"><div class="empty">Loading news...</div></div>
+  </div>
+</div>
+
+<script>
+const BASE = '';  // same origin
+
+function fmt(n, prefix='$') {
+  if (n == null) return '—';
+  const v = parseFloat(n);
+  const s = prefix + Math.abs(v).toFixed(2);
+  return v >= 0 ? `<span class="pos">+${s}</span>` : `<span class="neg">-${s}</span>`;
+}
+function fmtPrice(n) { return n != null ? parseFloat(n).toFixed(2) : '—'; }
+function ago(iso) {
+  if (!iso) return '—';
+  const d = (Date.now() - new Date(iso).getTime()) / 60000;
+  return d < 1 ? 'just now' : d < 60 ? `${Math.floor(d)}m ago` : `${Math.floor(d/60)}h ago`;
+}
+
+async function load(url) {
+  try { return await fetch(BASE + url).then(r => r.json()); }
+  catch { return null; }
+}
+
+async function refreshSummary() {
+  const d = await load('/dashboard/summary');
+  if (!d) { document.querySelector('.status-dot').className = 'status-dot offline'; document.getElementById('statusText').textContent = 'MT5 Offline'; return; }
+  document.querySelector('.status-dot').className = 'status-dot';
+  document.getElementById('statusText').textContent = `#${d.login} — ${d.server || 'Online'}`;
+  document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  document.getElementById('balance').innerHTML = `<span class="pos">$${parseFloat(d.balance||0).toFixed(2)}</span>`;
+  document.getElementById('equity').textContent = '$' + parseFloat(d.equity||0).toFixed(2);
+  document.getElementById('dailyPnl').innerHTML = fmt(d.dailyPnL);
+  document.getElementById('winRate').textContent = d.winRate ?? '—';
+  document.getElementById('openCount').textContent = d.openCount ?? '—';
+  document.getElementById('floatPnl').innerHTML = fmt(d.floatingPnL);
+  document.getElementById('todayTotal').textContent = d.totalToday ?? '—';
+  document.getElementById('wins').textContent = d.wins ?? '—';
+  document.getElementById('losses').textContent = d.losses ?? '—';
+}
+
+async function refreshSmc() {
+  const d = await load('/dashboard/smc');
+  if (!d) return;
+  document.getElementById('smcBias').textContent = d.bias ?? '—';
+  document.getElementById('smcBias').className = 'smc-val ' + (d.bias === 'BULLISH' ? 'pos' : d.bias === 'BEARISH' ? 'neg' : '');
+  document.getElementById('smcZone').textContent = d.zone ?? '—';
+  document.getElementById('smcConf').textContent = (d.confidence ?? 0) + '%';
+  document.getElementById('confFill').style.width = (d.confidence ?? 0) + '%';
+  document.getElementById('smcOB').textContent = d.obCount ?? 0;
+  document.getElementById('smcFVG').textContent = d.fvgCount ?? 0;
+  const dir = d.direction;
+  document.getElementById('smcDir').innerHTML = dir
+    ? `<span class="badge badge-${dir.toLowerCase()}">${dir}</span>`
+    : '<span class="neutral">WAIT</span>';
+}
+
+async function refreshPositions() {
+  const d = await load('/dashboard/positions');
+  const tbody = document.getElementById('positionsTable');
+  if (!d || !d.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>'; return; }
+  tbody.innerHTML = d.map(p => `
+    <tr>
+      <td>#${p.ticket}</td>
+      <td>${p.symbol}</td>
+      <td><span class="badge badge-${p.type?.toLowerCase()}">${p.type}</span></td>
+      <td>${p.lots}</td>
+      <td>${fmtPrice(p.open_price)}</td>
+      <td>${fmtPrice(p.sl)}</td>
+      <td>${fmtPrice(p.tp)}</td>
+      <td>${fmt(p.profit)}</td>
+    </tr>`).join('');
+}
+
+async function refreshTrades() {
+  const d = await load('/dashboard/trades');
+  const tbody = document.getElementById('tradesTable');
+  if (!d || !d.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>'; return; }
+  tbody.innerHTML = d.slice(0, 20).map(t => `
+    <tr>
+      <td>#${t.ticket}</td>
+      <td><span class="badge badge-${(t.direction||'').toLowerCase()}">${t.direction}</span></td>
+      <td>${fmtPrice(t.entryPrice)}</td>
+      <td>${fmtPrice(t.exitPrice) || '—'}</td>
+      <td>${t.pnl != null ? fmt(t.pnl) : '—'}</td>
+      <td>${t.rrActual != null ? t.rrActual : t.rrPlanned ?? '—'}</td>
+      <td>${t.confidence ?? '—'}%</td>
+      <td><span class="badge badge-${t.status === 'OPEN' ? 'pending' : t.pnl >= 0 ? 'approved' : 'rejected'}">${t.status}</span></td>
+    </tr>`).join('');
+}
+
+function renderBreakdown(bd) {
+  if (!bd) return '';
+  const components = [
+    { label: 'Trend',     emoji: '📈', key: 'trend',     max: 25 },
+    { label: 'SMC',       emoji: '🔷', key: 'smc',       max: 25 },
+    { label: 'Momentum',  emoji: '⚡', key: 'momentum',  max: 20 },
+    { label: 'Liquidity', emoji: '💧', key: 'liquidity', max: 20 },
+    { label: 'News',      emoji: '📰', key: 'news',      max: 5  },
+  ];
+  const rows = components.map(c => {
+    const comp  = bd[c.key] || { score: 0, max: c.max, reasons: [] };
+    const score = comp.score ?? 0;
+    const pct   = Math.max(0, Math.min(100, (Math.abs(score) / c.max) * 100));
+    const color = score < 0 ? '#ff4444' : score === 0 ? '#555' : '#00ff88';
+    const sign  = score > 0 ? '+' : '';
+    const tip   = (comp.reasons || []).join(' | ') || '';
+    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0" title="${tip}">
+      <span style="width:18px;font-size:13px">${c.emoji}</span>
+      <span style="width:72px;font-size:11px;color:#aaa">${c.label}</span>
+      <div style="flex:1;background:#1e2530;border-radius:3px;height:6px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${color};border-radius:3px;transition:width .4s"></div>
+      </div>
+      <span style="width:36px;font-size:11px;color:${color};text-align:right">${sign}${score}</span>
+      <span style="font-size:10px;color:#555">/${c.max}</span>
+    </div>`;
+  }).join('');
+  return `<div style="margin-top:10px;padding:10px;background:#0a0e16;border-radius:6px;border:1px solid #1e2530">
+    <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:600">CONFIDENCE BREAKDOWN</div>
+    ${rows}
+    <div style="border-top:1px solid #1e2530;margin-top:8px;padding-top:6px;display:flex;justify-content:space-between">
+      <span style="font-size:11px;color:#888">Total</span>
+      <span style="font-size:14px;font-weight:700;color:#00ff88">${bd.total ?? '—'}%</span>
+    </div>
+  </div>`;
+}
+
+async function refreshApprovals() {
+  const d = await load('/dashboard/approvals');
+  const container = document.getElementById('approvalsContainer');
+  if (!d || !d.length) {
+    container.innerHTML = '<div class="card"><p class="empty" style="padding:16px 0">No pending approvals</p></div>';
+    return;
+  }
+  container.innerHTML = d.map(a => {
+    const expiresIn  = a.expiresAt ? Math.max(0, Math.ceil((new Date(a.expiresAt) - Date.now()) / 60000)) : '?';
+    const dir        = (a.direction || '').toUpperCase();
+    const dirColor   = dir === 'BUY' ? '#00ff88' : '#ff4444';
+    const dirArrow   = dir === 'BUY' ? '▲' : '▼';
+    const bdHtml     = renderBreakdown(a.breakdown);
+    return `<div class="card" style="margin-bottom:12px;border-left:3px solid ${dirColor}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <span style="color:${dirColor};font-size:20px;font-weight:700">${dirArrow} ${dir}</span>
+          <span style="color:#888;margin-left:10px;font-size:13px">${a.symbol ?? 'XAUUSD'}</span>
+          <span style="color:#555;margin-left:6px;font-size:11px">#${a.id}</span>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:22px;font-weight:700;color:#00ff88">${a.confidence ?? '—'}%</div>
+          <div style="font-size:10px;color:${expiresIn < 2 ? '#ff4444' : '#888'}">${expiresIn}m left</div>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px">
+        <div><div style="color:#555;font-size:10px">ENTRY</div><div style="font-size:13px">${fmtPrice(a.entry)}</div></div>
+        <div><div style="color:#555;font-size:10px">SL</div><div style="font-size:13px;color:#ff4444">${fmtPrice(a.sl)}</div></div>
+        <div><div style="color:#555;font-size:10px">TP</div><div style="font-size:13px;color:#00ff88">${fmtPrice(a.tp)}</div></div>
+        <div><div style="color:#555;font-size:10px">RR</div><div style="font-size:13px">1:${a.rr ?? '—'}</div></div>
+      </div>
+      ${bdHtml}
+    </div>`;
+  }).join('');
+}
+
+async function refreshNews() {
+  const d = await load('/dashboard/news');
+  const container = document.getElementById('newsList');
+  if (!d || !d.length) { container.innerHTML = '<div class="empty">No high-impact news in the next 24h ✅</div>'; return; }
+  container.innerHTML = d.map(e => {
+    const min = e.minutesTill;
+    const timeStr = min > 0
+      ? `in ${Math.ceil(min)}m`
+      : `${Math.abs(Math.floor(min))}m ago`;
+    const soon = min > 0 && min < 45;
+    return `<div class="news-item">
+      <div>
+        <div class="news-title">${e.title} <span style="color:var(--muted)">(${e.country})</span></div>
+        <div style="color:var(--muted);font-size:11px;margin-top:2px">${new Date(e.date).toLocaleTimeString()} UTC${e.forecast ? ' · Forecast: ' + e.forecast : ''}${e.previous ? ' · Prev: ' + e.previous : ''}</div>
+      </div>
+      <div class="news-time ${soon ? 'soon' : ''}">${soon ? '⚠️ ' : ''}${timeStr}</div>
+    </div>`;
+  }).join('');
+}
+
+async function refreshAll() {
+  await Promise.all([refreshSummary(), refreshPositions(), refreshApprovals()]);
+}
+async function refreshSlow() {
+  await Promise.all([refreshSmc(), refreshTrades(), refreshNews()]);
+}
+
+// Initial load
+refreshAll();
+refreshSlow();
+
+// Fast refresh: summary + positions + approvals every 5s
+setInterval(refreshAll, 5_000);
+// Slow refresh: SMC + trades + news every 30s
+setInterval(refreshSlow, 30_000);
+</script>
+</body>
+</html>
