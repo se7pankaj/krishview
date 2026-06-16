@@ -36,11 +36,13 @@ const mockFeatures: any = {
   symbol: 'XAUUSD',
   timestamp: '2024-01-01T09:00:00Z',
   price: 2000,
-  htfTrend: { direction: 'bullish', ema20: 1990, ema50: 1985, ema200: 1950, aligned: true, ema200Distance: 2.5 },
-  ltfTrend: { direction: 'bullish', ema20: 1998, ema50: 1995, ema200: 1980, aligned: true, ema200Distance: 1.0 },
-  momentum: { rsi: 55, rsiZone: 'neutral', bullishDivergence: false, bearishDivergence: false, atr: 5 },
+  d1Trend:  { direction: 'bullish', ema20: 1990, ema50: 1985, ema200: 1950, aligned: true, ema200Distance: 2.5 },
+  h1Trend:  { direction: 'bullish', ema20: 1997, ema50: 1993, ema200: 1970, aligned: true, ema200Distance: 1.4 },
+  m15Trend: { direction: 'bullish', ema20: 1998, ema50: 1995, ema200: 1980, aligned: true, ema200Distance: 1.0 },
+  m5Trend:  { direction: 'bullish', ema20: 1999, ema50: 1997, ema200: 1985, aligned: true, ema200Distance: 0.7 },
+  momentum: { rsi: 55, rsiZone: 'neutral', rsiTrend: 'rising', bullishDivergence: false, bearishDivergence: false, atr: 5 },
   fibonacci: { swingHigh: 2050, swingLow: 1950, level382: 1988, level500: 2000, level618: 2012, currentZone: '38.2-50%' },
-  smc: { bias: 'BULLISH', bos: true, choch: false, obPresent: true, obHigh: 1998, obLow: 1995, fvgPresent: false, fvgHigh: null, fvgLow: null, liquiditySwept: true, zone: 'discount', zonePct: 40 },
+  smc: { bias: 'BULLISH', bos: true, choch: false, lastBosDirection: 'bullish', lastSwingHigh: 2010, lastSwingLow: 1980, obPresent: true, obHigh: 1998, obLow: 1995, fvgPresent: false, fvgHigh: null, fvgLow: null, liquiditySwept: true, zone: 'discount', zonePct: 40 },
 };
 
 function makeAxiosResponse(payload: object, promptTokens = 100, completionTokens = 50) {

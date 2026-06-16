@@ -6,257 +6,492 @@
 <title>KrishView — Live Trading Dashboard</title>
 <style>
   :root {
-    --bg:       #0d1117;
-    --surface:  #161b22;
-    --border:   #30363d;
-    --text:     #c9d1d9;
-    --muted:    #8b949e;
-    --green:    #00ff88;
-    --red:      #ff4444;
-    --yellow:   #f0c040;
-    --blue:     #58a6ff;
-    --purple:   #bc8cff;
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --text:    #c9d1d9;
+    --muted:   #8b949e;
+    --green:   #00ff88;
+    --red:     #ff4444;
+    --yellow:  #f0c040;
+    --blue:    #58a6ff;
+    --purple:  #bc8cff;
+    --orange:  #ff8c42;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, monospace; font-size: 13px; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 13px; }
 
-  /* ── Header ── */
-  .header {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 14px 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  .header h1 { font-size: 18px; color: var(--green); letter-spacing: 1px; }
+  /* Header */
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+  .header h1 { font-size: 17px; color: var(--green); letter-spacing: 1px; }
   .header h1 span { color: var(--text); font-weight: 300; }
+  .header-right { display: flex; align-items: center; gap: 14px; }
   .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
   .status-dot.offline { background: var(--red); animation: none; }
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
   .last-update { color: var(--muted); font-size: 11px; }
 
-  /* ── Layout ── */
-  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 24px; }
-  .grid-2 { grid-template-columns: repeat(2, 1fr); }
-  .grid-3 { grid-template-columns: repeat(3, 1fr); }
+  /* Trigger button */
+  .trigger-btn { background: rgba(88,166,255,.15); color: var(--blue); border: 1px solid var(--blue); border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 600; cursor: pointer; transition: background .2s; letter-spacing: .5px; }
+  .trigger-btn:hover { background: rgba(88,166,255,.28); }
+  .trigger-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .trigger-btn.running { border-color: var(--yellow); color: var(--yellow); background: rgba(240,192,64,.1); }
+  .trigger-btn.done    { border-color: var(--green);  color: var(--green);  background: rgba(0,255,136,.1); }
 
-  /* ── Cards ── */
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-  }
-  .card-title { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
-  .card-value { font-size: 26px; font-weight: 700; color: var(--text); }
-  .card-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
-  .pos { color: var(--green); }
-  .neg { color: var(--red); }
-  .neutral { color: var(--yellow); }
+  /* Layout */
+  .page { padding: 18px 24px; display: flex; flex-direction: column; gap: 18px; }
+  .row  { display: grid; gap: 14px; }
+  .row-4 { grid-template-columns: repeat(4, 1fr); }
+  .row-3 { grid-template-columns: repeat(3, 1fr); }
+  .row-2 { grid-template-columns: repeat(2, 1fr); }
+  .row-5 { grid-template-columns: repeat(5, 1fr); }
 
-  /* ── Tables ── */
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  .card-title { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; }
+  .card-value { font-size: 24px; font-weight: 700; color: var(--text); }
+  .card-sub   { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .pos  { color: var(--green)  !important; }
+  .neg  { color: var(--red)    !important; }
+  .neu  { color: var(--yellow) !important; }
+  .blue { color: var(--blue)   !important; }
+
+  /* Section header */
+  .section-hdr { display: flex; align-items: center; justify-content: space-between; }
+  .section-hdr h2 { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border); padding-bottom: 6px; flex: 1; }
+  .section-hdr a  { font-size: 11px; color: var(--blue); text-decoration: none; margin-left: 12px; }
+
+  /* Tables */
   table { width: 100%; border-collapse: collapse; }
-  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; }
-  td { padding: 8px 10px; border-bottom: 1px solid #21262d; font-size: 12px; }
+  th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+  td { padding: 8px 10px; border-bottom: 1px solid #1c2128; font-size: 12px; }
   tr:last-child td { border-bottom: none; }
-  tr:hover td { background: rgba(255,255,255,0.03); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  /* Badges */
   .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; }
-  .badge-buy  { background: rgba(0,255,136,0.15); color: var(--green); }
-  .badge-sell { background: rgba(255,68,68,0.15);  color: var(--red); }
-  .badge-pending  { background: rgba(240,192,64,0.15); color: var(--yellow); }
-  .badge-approved { background: rgba(0,255,136,0.15);  color: var(--green); }
-  .badge-rejected { background: rgba(255,68,68,0.15);  color: var(--red); }
+  .badge-buy      { background: rgba(0,255,136,.15);   color: var(--green); }
+  .badge-sell     { background: rgba(255,68,68,.15);   color: var(--red); }
+  .badge-pending  { background: rgba(240,192,64,.15);  color: var(--yellow); }
+  .badge-approved { background: rgba(0,255,136,.15);   color: var(--green); }
+  .badge-rejected { background: rgba(255,68,68,.15);   color: var(--red); }
+  .badge-open     { background: rgba(88,166,255,.15);  color: var(--blue); }
+  .badge-closed   { background: rgba(139,148,158,.15); color: var(--muted); }
 
-  /* ── SMC State ── */
-  .smc-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-  .smc-item { background: #0d1117; border-radius: 6px; padding: 10px; }
-  .smc-label { color: var(--muted); font-size: 10px; text-transform: uppercase; }
-  .smc-val { font-size: 15px; font-weight: 600; margin-top: 4px; }
+  /* SMC 4-layer */
+  .mtf-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .mtf-card { background: #0d1117; border-radius: 6px; padding: 12px; border: 1px solid #1c2128; }
+  .mtf-tf   { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; }
+  .mtf-tf span { font-size: 9px; background: #1c2128; border-radius: 3px; padding: 1px 5px; }
+  .mtf-val  { font-size: 16px; font-weight: 700; }
+  .mtf-sub  { font-size: 10px; color: var(--muted); margin-top: 4px; display: flex; flex-direction: column; gap: 2px; }
+  .mtf-sub b { font-weight: 600; }
 
-  /* ── News bar ── */
-  .news-list { display: flex; flex-direction: column; gap: 6px; }
-  .news-item { background: #0d1117; border-radius: 6px; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; }
+  /* Confidence breakdown */
+  .breakdown { padding: 10px; background: #0a0e16; border-radius: 6px; border: 1px solid #1e2530; margin-top: 10px; }
+  .breakdown-title { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 8px; }
+  .bd-row   { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .bd-emoji { width: 16px; font-size: 12px; }
+  .bd-label { width: 70px; font-size: 11px; color: #aaa; }
+  .bd-bar   { flex: 1; background: #1e2530; border-radius: 3px; height: 5px; overflow: hidden; }
+  .bd-fill  { height: 100%; border-radius: 3px; transition: width .4s; }
+  .bd-score { width: 34px; font-size: 11px; text-align: right; }
+  .bd-max   { font-size: 10px; color: #444; }
+  .bd-total { border-top: 1px solid #1e2530; margin-top: 8px; padding-top: 6px; display: flex; justify-content: space-between; }
+
+  /* News */
+  .news-item { border-radius: 6px; padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; border-left: 3px solid transparent; }
+  .news-item.impact-high   { background: rgba(255,68,68,.06);   border-left-color: var(--red); }
+  .news-item.impact-medium { background: rgba(240,192,64,.05);  border-left-color: var(--yellow); }
+  .news-item.impact-low    { background: rgba(139,148,158,.04); border-left-color: #333; }
   .news-title { font-size: 12px; }
-  .news-time { font-size: 11px; color: var(--yellow); white-space: nowrap; margin-left: 12px; }
-  .news-time.soon { color: var(--red); }
+  .news-meta  { font-size: 10px; color: var(--muted); margin-top: 2px; }
+  .news-time  { font-size: 11px; color: var(--muted); white-space: nowrap; margin-left: 12px; text-align: right; }
+  .news-time.soon    { color: var(--red); }
+  .news-time.warning { color: var(--yellow); }
+  .impact-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 9px; font-weight: 700; text-transform: uppercase; margin-right: 5px; }
+  .impact-badge.high   { background: rgba(255,68,68,.2);   color: var(--red); }
+  .impact-badge.medium { background: rgba(240,192,64,.2);  color: var(--yellow); }
+  .impact-badge.low    { background: rgba(139,148,158,.15); color: var(--muted); }
+  .news-filter { display: flex; gap: 6px; margin-bottom: 10px; }
+  .filter-btn { background: #0d1117; border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-size: 11px; color: var(--muted); cursor: pointer; }
+  .filter-btn.active { border-color: var(--blue); color: var(--blue); background: rgba(88,166,255,.1); }
 
-  /* ── Section labels ── */
-  .section { padding: 8px 24px 0; }
-  .section-title { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  /* Analysis card */
+  .ai-card { background: #0d1117; border-radius: 6px; padding: 12px; border: 1px solid #1e2530; }
+  .ai-row  { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .ai-chip { background: #1e2530; border-radius: 4px; padding: 3px 8px; font-size: 11px; color: var(--muted); }
+  .ai-chip b { color: var(--text); }
+  .reason-list { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+  .reason-list li { font-size: 11px; color: var(--muted); padding-left: 10px; position: relative; }
+  .reason-list li::before { content: '›'; position: absolute; left: 0; color: var(--blue); }
 
-  /* ── Approval pill ── */
-  .approval-row td:last-child { text-align: right; }
-  .approve-btn { background: rgba(0,255,136,0.15); color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer; }
-  .approve-btn:hover { background: rgba(0,255,136,0.3); }
+  /* Approval card */
+  .approval-card { border-radius: 8px; padding: 14px; margin-bottom: 10px; background: var(--surface); border: 1px solid var(--border); }
 
-  /* ── Empty state ── */
-  .empty { color: var(--muted); text-align: center; padding: 24px; font-size: 12px; }
+  /* Stat mini cards */
+  .stat-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .stat-mini { background: #0d1117; border-radius: 4px; padding: 4px 10px; font-size: 11px; }
+  .stat-mini span { color: var(--muted); margin-right: 4px; }
 
-  /* ── Confidence bar ── */
+  /* Conf bar */
   .conf-bar { background: #21262d; border-radius: 3px; height: 4px; margin-top: 6px; }
-  .conf-fill { height: 4px; border-radius: 3px; background: var(--green); transition: width 0.5s; }
+  .conf-fill { height: 4px; border-radius: 3px; transition: width .5s; }
+
+  /* Empty */
+  .empty { color: var(--muted); text-align: center; padding: 20px; font-size: 12px; }
+
+  /* Divider dot */
+  .dot { display: inline-block; width: 5px; height: 5px; border-radius: 50%; margin: 0 6px; vertical-align: middle; }
 </style>
 </head>
 <body>
 
-<!-- Header -->
+<!-- ── Header ─────────────────────────────────────────────────────────── -->
 <div class="header">
-  <h1>Krish<span>View</span> &nbsp;🤖&nbsp; Trading Dashboard</h1>
-  <div style="display:flex;align-items:center;gap:16px">
-    <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connecting...</span></span>
+  <h1>Krish<span>View</span> &nbsp;🤖&nbsp; <span style="font-weight:400;font-size:14px;color:var(--muted)">Trading Dashboard</span></h1>
+  <div class="header-right">
+    <button class="trigger-btn" id="triggerBtn" onclick="runTrigger()">⚡ Run Analysis</button>
+    <span><span class="status-dot" id="statusDot"></span><span id="statusText" style="font-size:12px">Connecting...</span></span>
     <span class="last-update" id="lastUpdate"></span>
   </div>
 </div>
 
-<!-- Account Summary -->
-<div class="grid" id="summaryGrid">
-  <div class="card"><div class="card-title">Balance</div><div class="card-value" id="balance">—</div><div class="card-sub">Account equity: <span id="equity">—</span></div></div>
-  <div class="card"><div class="card-title">Daily PnL</div><div class="card-value" id="dailyPnl">—</div><div class="card-sub"><span id="winRate">—</span>% win rate today</div></div>
-  <div class="card"><div class="card-title">Open Trades</div><div class="card-value" id="openCount">—</div><div class="card-sub">Floating: <span id="floatPnl">—</span></div></div>
-  <div class="card"><div class="card-title">Today's Trades</div><div class="card-value" id="todayTotal">—</div><div class="card-sub"><span id="wins">—</span>W / <span id="losses">—</span>L</div></div>
+<div class="page">
+
+<!-- ── Account Summary ───────────────────────────────────────────────── -->
+<div class="row row-4" id="summaryRow">
+  <div class="card">
+    <div class="card-title">Balance</div>
+    <div class="card-value pos" id="balance">—</div>
+    <div class="card-sub">Equity: <span id="equity">—</span></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Daily PnL</div>
+    <div class="card-value" id="dailyPnl">—</div>
+    <div class="card-sub"><span id="winRate">—</span>% win rate today</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Open Trades</div>
+    <div class="card-value" id="openCount">—</div>
+    <div class="card-sub">Floating: <span id="floatPnl">—</span></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Today's Trades</div>
+    <div class="card-value" id="todayTotal">—</div>
+    <div class="card-sub"><span id="wins">—</span>W / <span id="losses">—</span>L</div>
+  </div>
 </div>
 
-<!-- SMC State -->
-<div class="section"><div class="section-title">Live SMC State</div></div>
-<div style="padding:12px 24px 0">
+<!-- ── All-time Stats ────────────────────────────────────────────────── -->
+<div class="row row-5" id="statsRow">
   <div class="card">
-    <div class="smc-grid" id="smcGrid">
-      <div class="smc-item"><div class="smc-label">HTF Bias</div><div class="smc-val" id="smcBias">—</div></div>
-      <div class="smc-item"><div class="smc-label">Zone</div><div class="smc-val" id="smcZone">—</div></div>
-      <div class="smc-item"><div class="smc-label">Confidence</div><div class="smc-val" id="smcConf">—</div><div class="conf-bar"><div class="conf-fill" id="confFill" style="width:0%"></div></div></div>
-      <div class="smc-item"><div class="smc-label">Order Blocks</div><div class="smc-val" id="smcOB">—</div></div>
-      <div class="smc-item"><div class="smc-label">FVGs</div><div class="smc-val" id="smcFVG">—</div></div>
-      <div class="smc-item"><div class="smc-label">Direction</div><div class="smc-val" id="smcDir">—</div></div>
+    <div class="card-title">All-time Trades</div>
+    <div class="card-value" id="statTotal">—</div>
+    <div class="card-sub" id="statWL">—W / —L</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Win Rate</div>
+    <div class="card-value" id="statWinRate">—</div>
+    <div class="card-sub">All closed trades</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Total PnL</div>
+    <div class="card-value" id="statPnl">—</div>
+    <div class="card-sub">Net profit/loss</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Avg RR</div>
+    <div class="card-value" id="statRR">—</div>
+    <div class="card-sub">Risk:reward ratio</div>
+  </div>
+  <div class="card">
+    <div class="card-title">Profit Factor</div>
+    <div class="card-value" id="statPF">—</div>
+    <div class="card-sub">Gross profit / loss</div>
+  </div>
+</div>
+
+<!-- ── 4-Layer MTF Analysis ──────────────────────────────────────────── -->
+<div>
+  <div class="section-hdr"><h2>4-Layer MTF Analysis &nbsp;🔬</h2></div>
+  <div style="margin-top:10px">
+    <div class="card">
+      <div class="mtf-grid" id="mtfGrid">
+        <div class="mtf-card">
+          <div class="mtf-tf">D1 — Direction <span>Macro Bias</span></div>
+          <div class="mtf-val" id="mtfD1Bias">—</div>
+          <div class="mtf-sub" id="mtfD1Sub"><span>—</span></div>
+        </div>
+        <div class="mtf-card">
+          <div class="mtf-tf">H1 — Structure <span>PRIORITY</span></div>
+          <div class="mtf-val" id="mtfH1Bos">—</div>
+          <div class="mtf-sub" id="mtfH1Sub"><span>—</span></div>
+        </div>
+        <div class="mtf-card">
+          <div class="mtf-tf">M15 — Setup <span>OB / FVG</span></div>
+          <div class="mtf-val" id="mtfM15Zone">—</div>
+          <div class="mtf-sub" id="mtfM15Sub"><span>—</span></div>
+        </div>
+        <div class="mtf-card">
+          <div class="mtf-tf">M5 — Entry <span>Trigger</span></div>
+          <div class="mtf-val" id="mtfM5Dir">—</div>
+          <div class="mtf-sub" id="mtfM5Sub"><span>—</span></div>
+        </div>
+      </div>
+
+      <!-- Overall confidence + direction -->
+      <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#0d1117;border-radius:6px;padding:10px">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px">Signal Direction</div>
+          <div style="font-size:22px;font-weight:700;margin-top:4px" id="smcDirBig">—</div>
+        </div>
+        <div style="background:#0d1117;border-radius:6px;padding:10px">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.8px">SMC Confidence</div>
+          <div style="font-size:22px;font-weight:700;color:var(--green);margin-top:4px" id="smcConfBig">—</div>
+          <div class="conf-bar"><div class="conf-fill" id="confFill" style="width:0%;background:var(--green)"></div></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
 
-<!-- Pending Approvals -->
-<div class="section" style="margin-top:16px"><div class="section-title">Pending Approvals ⏳</div></div>
-<div style="padding:12px 24px 0" id="approvalsContainer">
-  <div class="card"><p class="empty" style="padding:16px 0">No pending approvals</p></div>
-</div>
-
-<!-- Open Positions -->
-<div class="section" style="margin-top:16px"><div class="section-title">Open Positions</div></div>
-<div style="padding:12px 24px 0">
-  <div class="card">
-    <table>
-      <thead><tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lots</th><th>Open Price</th><th>SL</th><th>TP</th><th>Profit</th></tr></thead>
-      <tbody id="positionsTable"><tr><td colspan="8" class="empty">No open positions</td></tr></tbody>
-    </table>
+<!-- ── Latest Analysis (AI) ──────────────────────────────────────────── -->
+<div>
+  <div class="section-hdr"><h2>Latest AI Analysis &nbsp;🧠</h2></div>
+  <div style="margin-top:10px" id="latestAnalysisSection">
+    <div class="card"><div class="empty">No analysis yet — click ⚡ Run Analysis</div></div>
   </div>
 </div>
 
-<!-- Recent Trades -->
-<div class="section" style="margin-top:16px"><div class="section-title">Recent Trades</div></div>
-<div style="padding:12px 24px 0">
-  <div class="card">
-    <table>
-      <thead><tr><th>Ticket</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>RR</th><th>Confidence</th><th>Status</th></tr></thead>
-      <tbody id="tradesTable"><tr><td colspan="8" class="empty">No trades yet</td></tr></tbody>
-    </table>
+<!-- ── Pending Approvals ─────────────────────────────────────────────── -->
+<div>
+  <div class="section-hdr"><h2>Pending Approvals &nbsp;⏳</h2></div>
+  <div style="margin-top:10px" id="approvalsContainer">
+    <div class="card"><div class="empty">No pending approvals</div></div>
   </div>
 </div>
 
-<!-- Upcoming News -->
-<div class="section" style="margin-top:16px"><div class="section-title">Upcoming High-Impact News 📰</div></div>
-<div style="padding:12px 24px 20px">
-  <div class="card">
-    <div class="news-list" id="newsList"><div class="empty">Loading news...</div></div>
+<!-- ── Open Positions ────────────────────────────────────────────────── -->
+<div>
+  <div class="section-hdr"><h2>Open Positions</h2></div>
+  <div style="margin-top:10px">
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lots</th><th>Open Price</th><th>Current</th><th>SL</th><th>TP</th><th>Profit</th><th>Duration</th></tr>
+        </thead>
+        <tbody id="positionsTable">
+          <tr><td colspan="10" class="empty">No open positions</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
+
+<!-- ── Recent Trades ─────────────────────────────────────────────────── -->
+<div>
+  <div class="section-hdr">
+    <h2>Recent Trades</h2>
+    <a href="/dashboard/journal/export" download>⬇ Export CSV</a>
+  </div>
+  <div style="margin-top:10px">
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Ticket</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL</th><th>RR</th><th>Confidence</th><th>Close Reason</th><th>Status</th><th>Date</th></tr>
+        </thead>
+        <tbody id="tradesTable">
+          <tr><td colspan="10" class="empty">No trades yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ── Upcoming News ─────────────────────────────────────────────────── -->
+<div style="padding-bottom:20px">
+  <div class="section-hdr"><h2>Economic Calendar &nbsp;📰</h2></div>
+  <div style="margin-top:10px">
+    <div class="card">
+      <div class="news-filter">
+        <button class="filter-btn active" onclick="setNewsFilter('all',this)">All</button>
+        <button class="filter-btn" onclick="setNewsFilter('High',this)">🔴 High</button>
+        <button class="filter-btn" onclick="setNewsFilter('Medium',this)">🟡 Medium</button>
+        <button class="filter-btn" onclick="setNewsFilter('Low',this)">⚪ Low</button>
+      </div>
+      <div id="newsList" style="max-height:280px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d #0d1117"><div class="empty">Loading news...</div></div>
+    </div>
+  </div>
+</div>
+
+</div><!-- end .page -->
 
 <script>
-const BASE = '';  // same origin
-
-function fmt(n, prefix='$') {
+// ── Formatters ──────────────────────────────────────────────────────────────
+const fmt = (n, prefix='$') => {
   if (n == null) return '—';
   const v = parseFloat(n);
   const s = prefix + Math.abs(v).toFixed(2);
-  return v >= 0 ? `<span class="pos">+${s}</span>` : `<span class="neg">-${s}</span>`;
-}
-function fmtPrice(n) { return n != null ? parseFloat(n).toFixed(2) : '—'; }
-function ago(iso) {
+  return v >= 0
+    ? `<span class="pos">+${s}</span>`
+    : `<span class="neg">-${s}</span>`;
+};
+const fmtN  = n => n != null ? parseFloat(n).toFixed(2) : '—';
+const fmtPct = n => n != null ? parseFloat(n).toFixed(1) + '%' : '—';
+const ago = iso => {
   if (!iso) return '—';
-  const d = (Date.now() - new Date(iso).getTime()) / 60000;
-  return d < 1 ? 'just now' : d < 60 ? `${Math.floor(d)}m ago` : `${Math.floor(d/60)}h ago`;
-}
+  const m = (Date.now() - new Date(iso).getTime()) / 60000;
+  return m < 1 ? 'just now' : m < 60 ? `${Math.floor(m)}m ago` : m < 1440 ? `${Math.floor(m/60)}h ago` : `${Math.floor(m/1440)}d ago`;
+};
+const duration = iso => {
+  if (!iso) return '—';
+  const h = (Date.now() - new Date(iso).getTime()) / 3600000;
+  return h < 1 ? `${Math.round(h*60)}m` : `${h.toFixed(1)}h`;
+};
 
 async function load(url) {
-  try { return await fetch(BASE + url).then(r => r.json()); }
+  try { return await fetch(url).then(r => r.json()); }
   catch { return null; }
 }
 
+// ── Summary ─────────────────────────────────────────────────────────────────
 async function refreshSummary() {
   const d = await load('/dashboard/summary');
-  if (!d) { document.querySelector('.status-dot').className = 'status-dot offline'; document.getElementById('statusText').textContent = 'MT5 Offline'; return; }
-  document.querySelector('.status-dot').className = 'status-dot';
+  const dot = document.getElementById('statusDot');
+  if (!d) {
+    dot.className = 'status-dot offline';
+    document.getElementById('statusText').textContent = 'MT5 Offline';
+    return;
+  }
+  dot.className = 'status-dot';
   document.getElementById('statusText').textContent = `#${d.login} — ${d.server || 'Online'}`;
   document.getElementById('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
-  document.getElementById('balance').innerHTML = `<span class="pos">$${parseFloat(d.balance||0).toFixed(2)}</span>`;
-  document.getElementById('equity').textContent = '$' + parseFloat(d.equity||0).toFixed(2);
-  document.getElementById('dailyPnl').innerHTML = fmt(d.dailyPnL);
-  document.getElementById('winRate').textContent = d.winRate ?? '—';
-  document.getElementById('openCount').textContent = d.openCount ?? '—';
-  document.getElementById('floatPnl').innerHTML = fmt(d.floatingPnL);
+  document.getElementById('balance').textContent    = '$' + parseFloat(d.balance||0).toFixed(2);
+  document.getElementById('equity').textContent     = '$' + parseFloat(d.equity||0).toFixed(2);
+  document.getElementById('dailyPnl').innerHTML     = fmt(d.dailyPnL);
+  document.getElementById('winRate').textContent    = d.winRate ?? '—';
+  document.getElementById('openCount').textContent  = d.openCount ?? '—';
+  document.getElementById('floatPnl').innerHTML     = fmt(d.floatingPnL);
   document.getElementById('todayTotal').textContent = d.totalToday ?? '—';
-  document.getElementById('wins').textContent = d.wins ?? '—';
-  document.getElementById('losses').textContent = d.losses ?? '—';
+  document.getElementById('wins').textContent       = d.wins ?? '—';
+  document.getElementById('losses').textContent     = d.losses ?? '—';
 }
 
+// ── All-time Stats ───────────────────────────────────────────────────────────
+async function refreshStats() {
+  const d = await load('/dashboard/stats');
+  if (!d) return;
+  document.getElementById('statTotal').textContent   = d.total ?? '—';
+  document.getElementById('statWL').textContent      = `${d.wins ?? '—'}W / ${d.losses ?? '—'}L`;
+  document.getElementById('statWinRate').textContent = d.winRate != null ? d.winRate + '%' : '—';
+  const pnlEl = document.getElementById('statPnl');
+  pnlEl.innerHTML = fmt(d.totalPnL);
+  document.getElementById('statRR').textContent = d.avgRR != null ? '1:' + parseFloat(d.avgRR).toFixed(2) : '—';
+  document.getElementById('statPF').textContent = d.profitFactor != null ? parseFloat(d.profitFactor).toFixed(2) : '—';
+}
+
+// ── 4-Layer MTF ──────────────────────────────────────────────────────────────
 async function refreshSmc() {
   const d = await load('/dashboard/smc');
   if (!d) return;
-  document.getElementById('smcBias').textContent = d.bias ?? '—';
-  document.getElementById('smcBias').className = 'smc-val ' + (d.bias === 'BULLISH' ? 'pos' : d.bias === 'BEARISH' ? 'neg' : '');
-  document.getElementById('smcZone').textContent = d.zone ?? '—';
-  document.getElementById('smcConf').textContent = (d.confidence ?? 0) + '%';
-  document.getElementById('confFill').style.width = (d.confidence ?? 0) + '%';
-  document.getElementById('smcOB').textContent = d.obCount ?? 0;
-  document.getElementById('smcFVG').textContent = d.fvgCount ?? 0;
-  const dir = d.direction;
-  document.getElementById('smcDir').innerHTML = dir
-    ? `<span class="badge badge-${dir.toLowerCase()}">${dir}</span>`
-    : '<span class="neutral">WAIT</span>';
+
+  // D1
+  const biasEl = document.getElementById('mtfD1Bias');
+  biasEl.textContent = d.bias ?? '—';
+  biasEl.className   = 'mtf-val ' + (d.bias === 'BULLISH' ? 'pos' : d.bias === 'BEARISH' ? 'neg' : 'neu');
+  document.getElementById('mtfD1Sub').innerHTML = `<span>Macro direction</span>`;
+
+  // H1
+  const bosEl = document.getElementById('mtfH1Bos');
+  const h1Val = d.h1Bos ? 'BOS ✓' : d.h1Choch ? 'CHoCH ✓' : 'No Break';
+  bosEl.textContent = h1Val;
+  bosEl.className   = 'mtf-val ' + (d.h1Bos || d.h1Choch ? 'pos' : 'neu');
+  document.getElementById('mtfH1Sub').innerHTML =
+    `<span><b>BOS:</b> ${d.h1Bos ? '✓' : '✗'} &nbsp; <b>CHoCH:</b> ${d.h1Choch ? '✓' : '✗'}</span>`;
+
+  // M15
+  const zoneEl = document.getElementById('mtfM15Zone');
+  zoneEl.textContent = d.zone ?? '—';
+  zoneEl.className   = 'mtf-val ' + (d.zone === 'discount' ? 'pos' : d.zone === 'premium' ? 'neg' : 'neu');
+  document.getElementById('mtfM15Sub').innerHTML =
+    `<span><b>OBs:</b> ${d.obCount ?? 0} &nbsp; <b>FVGs:</b> ${d.fvgCount ?? 0} &nbsp; <b>Zone:</b> ${(d.zonePct ?? 0).toFixed(0)}%</span>`;
+
+  // M5
+  const dirEl = document.getElementById('mtfM5Dir');
+  const dirVal = d.direction ?? 'WAIT';
+  dirEl.textContent = dirVal;
+  dirEl.className   = 'mtf-val ' + (dirVal === 'BUY' ? 'pos' : dirVal === 'SELL' ? 'neg' : 'neu');
+  document.getElementById('mtfM5Sub').innerHTML =
+    `<span><b>Sweeps:</b> ${d.sweepCount ?? 0} &nbsp; Entry trigger</span>`;
+
+  // Overall
+  const dirBig = document.getElementById('smcDirBig');
+  dirBig.textContent = d.direction ?? 'WAIT';
+  dirBig.className   = d.direction === 'BUY' ? 'pos' : d.direction === 'SELL' ? 'neg' : 'neu';
+
+  const conf = d.confidence ?? 0;
+  document.getElementById('smcConfBig').textContent = conf + '%';
+  const fill = document.getElementById('confFill');
+  fill.style.width      = conf + '%';
+  fill.style.background = conf >= 70 ? 'var(--green)' : conf >= 50 ? 'var(--yellow)' : 'var(--red)';
 }
 
-async function refreshPositions() {
-  const d = await load('/dashboard/positions');
-  const tbody = document.getElementById('positionsTable');
-  if (!d || !d.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No open positions</td></tr>'; return; }
-  tbody.innerHTML = d.map(p => `
-    <tr>
-      <td>#${p.ticket}</td>
-      <td>${p.symbol}</td>
-      <td><span class="badge badge-${p.type?.toLowerCase()}">${p.type}</span></td>
-      <td>${p.lots}</td>
-      <td>${fmtPrice(p.open_price)}</td>
-      <td>${fmtPrice(p.sl)}</td>
-      <td>${fmtPrice(p.tp)}</td>
-      <td>${fmt(p.profit)}</td>
-    </tr>`).join('');
+// ── Latest Analysis ──────────────────────────────────────────────────────────
+async function refreshLatestAnalysis() {
+  const d = await load('/dashboard/analysis/latest');
+  const section = document.getElementById('latestAnalysisSection');
+
+  if (!d || !d.id) {
+    section.innerHTML = '<div class="card"><div class="empty">No analysis yet — click ⚡ Run Analysis</div></div>';
+    return;
+  }
+
+  const sig     = d.signal;
+  const ai      = d.aiRecommendation;
+  const dirColor = sig?.direction === 'BUY' ? 'var(--green)' : sig?.direction === 'SELL' ? 'var(--red)' : 'var(--yellow)';
+
+  const breakdownHtml = renderBreakdown(d.breakdown);
+
+  const reasonsHtml = (ai?.reasons || []).length
+    ? '<ul class="reason-list">' + (ai.reasons).map(r => `<li>${r}</li>`).join('') + '</ul>'
+    : '';
+  const risksHtml = (ai?.risks || []).length
+    ? `<div style="margin-top:8px"><div style="color:var(--red);font-size:10px;text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px">Risks</div><ul class="reason-list">` +
+      ai.risks.map(r => `<li style="color:var(--red)">${r}</li>`).join('') + '</ul></div>'
+    : '';
+
+  section.innerHTML = `
+    <div class="card">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+        <div style="flex:1">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+            <span style="font-size:26px;font-weight:700;color:${dirColor}">${sig?.direction ?? '—'}</span>
+            <span style="font-size:12px;color:var(--muted)">${d.symbol ?? 'XAUUSD'}</span>
+            <span class="badge badge-${(sig?.direction||'').toLowerCase()}">${ai?.decision ?? '—'}</span>
+            <span style="font-size:11px;color:var(--muted)">${ago(d.createdAt)}</span>
+          </div>
+          <div class="ai-row">
+            <div class="ai-chip"><span>Entry</span> <b>${fmtN(ai?.entryPrice)}</b></div>
+            <div class="ai-chip"><span>SL</span> <b style="color:var(--red)">${fmtN(ai?.stopLoss)}</b></div>
+            <div class="ai-chip"><span>TP</span> <b style="color:var(--green)">${fmtN(ai?.takeProfit)}</b></div>
+            <div class="ai-chip"><span>RR</span> <b>1:${ai?.rr ?? '—'}</b></div>
+            <div class="ai-chip"><span>Model</span> <b>${ai?.model ?? '—'}</b></div>
+            <div class="ai-chip"><span>Tokens</span> <b>${((ai?.promptTokens ?? 0) + (ai?.completionTokens ?? 0)).toLocaleString()}</b></div>
+          </div>
+          <div style="margin-top:10px">${reasonsHtml}${risksHtml}</div>
+        </div>
+        <div style="text-align:right;min-width:80px">
+          <div style="font-size:32px;font-weight:700;color:var(--green)">${d.confidence ?? '—'}%</div>
+          <div style="font-size:10px;color:var(--muted)">Confidence</div>
+        </div>
+      </div>
+      ${breakdownHtml}
+    </div>`;
 }
 
-async function refreshTrades() {
-  const d = await load('/dashboard/trades');
-  const tbody = document.getElementById('tradesTable');
-  if (!d || !d.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No trades yet</td></tr>'; return; }
-  tbody.innerHTML = d.slice(0, 20).map(t => `
-    <tr>
-      <td>#${t.ticket}</td>
-      <td><span class="badge badge-${(t.direction||'').toLowerCase()}">${t.direction}</span></td>
-      <td>${fmtPrice(t.entryPrice)}</td>
-      <td>${fmtPrice(t.exitPrice) || '—'}</td>
-      <td>${t.pnl != null ? fmt(t.pnl) : '—'}</td>
-      <td>${t.rrActual != null ? t.rrActual : t.rrPlanned ?? '—'}</td>
-      <td>${t.confidence ?? '—'}%</td>
-      <td><span class="badge badge-${t.status === 'OPEN' ? 'pending' : t.pnl >= 0 ? 'approved' : 'rejected'}">${t.status}</span></td>
-    </tr>`).join('');
-}
-
+// ── Confidence Breakdown ─────────────────────────────────────────────────────
 function renderBreakdown(bd) {
   if (!bd) return '';
   const components = [
@@ -270,100 +505,226 @@ function renderBreakdown(bd) {
     const comp  = bd[c.key] || { score: 0, max: c.max, reasons: [] };
     const score = comp.score ?? 0;
     const pct   = Math.max(0, Math.min(100, (Math.abs(score) / c.max) * 100));
-    const color = score < 0 ? '#ff4444' : score === 0 ? '#555' : '#00ff88';
+    const color = score < 0 ? '#ff4444' : score === 0 ? '#333' : '#00ff88';
     const sign  = score > 0 ? '+' : '';
-    const tip   = (comp.reasons || []).join(' | ') || '';
-    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0" title="${tip}">
-      <span style="width:18px;font-size:13px">${c.emoji}</span>
-      <span style="width:72px;font-size:11px;color:#aaa">${c.label}</span>
-      <div style="flex:1;background:#1e2530;border-radius:3px;height:6px;overflow:hidden">
-        <div style="width:${pct}%;height:100%;background:${color};border-radius:3px;transition:width .4s"></div>
-      </div>
-      <span style="width:36px;font-size:11px;color:${color};text-align:right">${sign}${score}</span>
-      <span style="font-size:10px;color:#555">/${c.max}</span>
+    const tip   = (comp.reasons || []).join(' | ');
+    return `<div class="bd-row" title="${tip}">
+      <span class="bd-emoji">${c.emoji}</span>
+      <span class="bd-label">${c.label}</span>
+      <div class="bd-bar"><div class="bd-fill" style="width:${pct}%;background:${color}"></div></div>
+      <span class="bd-score" style="color:${color}">${sign}${score}</span>
+      <span class="bd-max">/${c.max}</span>
     </div>`;
   }).join('');
-  return `<div style="margin-top:10px;padding:10px;background:#0a0e16;border-radius:6px;border:1px solid #1e2530">
-    <div style="font-size:11px;color:#888;margin-bottom:6px;font-weight:600">CONFIDENCE BREAKDOWN</div>
+  return `<div class="breakdown">
+    <div class="breakdown-title">Confidence Breakdown</div>
     ${rows}
-    <div style="border-top:1px solid #1e2530;margin-top:8px;padding-top:6px;display:flex;justify-content:space-between">
-      <span style="font-size:11px;color:#888">Total</span>
-      <span style="font-size:14px;font-weight:700;color:#00ff88">${bd.total ?? '—'}%</span>
+    <div class="bd-total">
+      <span style="font-size:11px;color:var(--muted)">Total</span>
+      <span style="font-size:15px;font-weight:700;color:var(--green)">${bd.total ?? '—'}%</span>
     </div>
   </div>`;
 }
 
+// ── Approvals ────────────────────────────────────────────────────────────────
 async function refreshApprovals() {
   const d = await load('/dashboard/approvals');
   const container = document.getElementById('approvalsContainer');
   if (!d || !d.length) {
-    container.innerHTML = '<div class="card"><p class="empty" style="padding:16px 0">No pending approvals</p></div>';
+    container.innerHTML = '<div class="card"><div class="empty">No pending approvals</div></div>';
     return;
   }
   container.innerHTML = d.map(a => {
-    const expiresIn  = a.expiresAt ? Math.max(0, Math.ceil((new Date(a.expiresAt) - Date.now()) / 60000)) : '?';
-    const dir        = (a.direction || '').toUpperCase();
-    const dirColor   = dir === 'BUY' ? '#00ff88' : '#ff4444';
-    const dirArrow   = dir === 'BUY' ? '▲' : '▼';
-    const bdHtml     = renderBreakdown(a.breakdown);
-    return `<div class="card" style="margin-bottom:12px;border-left:3px solid ${dirColor}">
+    const dir      = (a.direction || '').toUpperCase();
+    const dirColor = dir === 'BUY' ? 'var(--green)' : 'var(--red)';
+    const expiresIn = a.expiresAt ? Math.max(0, Math.ceil((new Date(a.expiresAt) - Date.now()) / 60000)) : '?';
+    return `<div class="approval-card" style="border-left:3px solid ${dirColor}">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
-          <span style="color:${dirColor};font-size:20px;font-weight:700">${dirArrow} ${dir}</span>
-          <span style="color:#888;margin-left:10px;font-size:13px">${a.symbol ?? 'XAUUSD'}</span>
-          <span style="color:#555;margin-left:6px;font-size:11px">#${a.id}</span>
+          <span style="color:${dirColor};font-size:20px;font-weight:700">${dir === 'BUY' ? '▲' : '▼'} ${dir}</span>
+          <span style="color:var(--muted);margin-left:8px;font-size:12px">${a.symbol ?? 'XAUUSD'} &nbsp;#${a.id}</span>
         </div>
         <div style="text-align:right">
-          <div style="font-size:22px;font-weight:700;color:#00ff88">${a.confidence ?? '—'}%</div>
-          <div style="font-size:10px;color:${expiresIn < 2 ? '#ff4444' : '#888'}">${expiresIn}m left</div>
+          <div style="font-size:24px;font-weight:700;color:var(--green)">${a.confidence ?? '—'}%</div>
+          <div style="font-size:10px;color:${expiresIn < 3 ? 'var(--red)' : 'var(--muted)'}">${expiresIn}m left</div>
         </div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px">
-        <div><div style="color:#555;font-size:10px">ENTRY</div><div style="font-size:13px">${fmtPrice(a.entry)}</div></div>
-        <div><div style="color:#555;font-size:10px">SL</div><div style="font-size:13px;color:#ff4444">${fmtPrice(a.sl)}</div></div>
-        <div><div style="color:#555;font-size:10px">TP</div><div style="font-size:13px;color:#00ff88">${fmtPrice(a.tp)}</div></div>
-        <div><div style="color:#555;font-size:10px">RR</div><div style="font-size:13px">1:${a.rr ?? '—'}</div></div>
+        <div><div style="color:var(--muted);font-size:10px">ENTRY</div><div style="font-size:14px">${fmtN(a.entry)}</div></div>
+        <div><div style="color:var(--muted);font-size:10px">SL</div><div style="font-size:14px;color:var(--red)">${fmtN(a.sl)}</div></div>
+        <div><div style="color:var(--muted);font-size:10px">TP</div><div style="font-size:14px;color:var(--green)">${fmtN(a.tp)}</div></div>
+        <div><div style="color:var(--muted);font-size:10px">RR</div><div style="font-size:14px">1:${a.rr ?? '—'}</div></div>
       </div>
-      ${bdHtml}
+      ${renderBreakdown(a.breakdown)}
+    </div>`;
+  }).join('');
+}
+
+// ── Positions ────────────────────────────────────────────────────────────────
+async function refreshPositions() {
+  const d = await load('/dashboard/positions');
+  const tbody = document.getElementById('positionsTable');
+  if (!d || !d.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No open positions</td></tr>';
+    return;
+  }
+  tbody.innerHTML = d.map(p => `
+    <tr>
+      <td style="color:var(--muted)">#${p.ticket}</td>
+      <td>${p.symbol}</td>
+      <td><span class="badge badge-${(p.type||'').toLowerCase()}">${p.type}</span></td>
+      <td>${p.lots}</td>
+      <td>${fmtN(p.open_price)}</td>
+      <td>—</td>
+      <td style="color:var(--red)">${fmtN(p.sl)}</td>
+      <td style="color:var(--green)">${fmtN(p.tp)}</td>
+      <td>${fmt(p.profit)}</td>
+      <td style="color:var(--muted)">${duration(p.open_time)}</td>
+    </tr>`).join('');
+}
+
+// ── Recent Trades ────────────────────────────────────────────────────────────
+async function refreshTrades() {
+  const d = await load('/dashboard/trades');
+  const tbody = document.getElementById('tradesTable');
+  if (!d || !d.length) {
+    tbody.innerHTML = '<tr><td colspan="10" class="empty">No trades yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = d.slice(0, 30).map(t => {
+    const statusCls = t.status === 'OPEN' ? 'open' : t.pnl >= 0 ? 'approved' : 'rejected';
+    return `<tr>
+      <td style="color:var(--muted)">#${t.ticket}</td>
+      <td><span class="badge badge-${(t.direction||'').toLowerCase()}">${t.direction}</span></td>
+      <td>${fmtN(t.entryPrice)}</td>
+      <td>${t.exitPrice ? fmtN(t.exitPrice) : '—'}</td>
+      <td>${t.pnl != null ? fmt(t.pnl) : '—'}</td>
+      <td>${t.rrActual != null ? '1:' + t.rrActual : t.rrPlanned ? '1:' + t.rrPlanned : '—'}</td>
+      <td>${t.confidence ?? '—'}%</td>
+      <td style="color:var(--muted);font-size:11px">${t.closeReason ?? '—'}</td>
+      <td><span class="badge badge-${statusCls}">${t.status}</span></td>
+      <td style="color:var(--muted)">${ago(t.openTime)}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ── News ─────────────────────────────────────────────────────────────────────
+let allNewsEvents = [];
+let newsFilter    = 'all';
+
+function setNewsFilter(filter, btn) {
+  newsFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderNews();
+}
+
+const impactOrder = { 'High': 0, 'Medium': 1, 'Low': 2 };
+
+function renderNews() {
+  const container = document.getElementById('newsList');
+  const filtered  = newsFilter === 'all'
+    ? allNewsEvents
+    : allNewsEvents.filter(e => e.impact === newsFilter);
+
+  // Sort: High first → Medium → Low, then by time within each group
+  const events = [...filtered].sort((a, b) => {
+    const io = (impactOrder[a.impact] ?? 3) - (impactOrder[b.impact] ?? 3);
+    return io !== 0 ? io : a.minutesTill - b.minutesTill;
+  });
+
+  if (!events.length) {
+    container.innerHTML = '<div class="empty">No events for selected filter ✅</div>';
+    return;
+  }
+
+  container.innerHTML = events.map(e => {
+    const min      = e.minutesTill;
+    const isPast   = min < 0;
+    const soon     = !isPast && min <= 30;
+    const warning  = !isPast && min <= 60 && min > 30;
+    const impactCls = (e.impact || 'low').toLowerCase();
+
+    const timeStr = isPast
+      ? `${Math.abs(Math.floor(min))}m ago`
+      : min < 60
+        ? `in ${Math.ceil(min)}m`
+        : `in ${(min/60).toFixed(1)}h`;
+
+    const timeCls = soon ? 'soon' : warning ? 'warning' : '';
+    const warn    = soon && e.impact === 'High' ? '⚠️ ' : '';
+
+    const actualStr = e.actual ? `<b style="color:var(--green)">Actual: ${e.actual}</b> · ` : '';
+
+    return `<div class="news-item impact-${impactCls}">
+      <div style="flex:1">
+        <div class="news-title">
+          <span class="impact-badge ${impactCls}">${e.impact}</span>
+          <b>${e.country}</b> — ${e.title}
+        </div>
+        <div class="news-meta">
+          ${new Date(e.date).toLocaleString([], {weekday:'short', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}
+          ${e.forecast ? ' · Forecast: ' + e.forecast : ''}
+          ${e.previous ? ' · Prev: ' + e.previous : ''}
+          ${actualStr}
+        </div>
+      </div>
+      <div class="news-time ${timeCls}" style="min-width:70px;text-align:right">
+        ${warn}${timeStr}
+        ${isPast ? '<br><span style="font-size:9px;color:#444">passed</span>' : ''}
+      </div>
     </div>`;
   }).join('');
 }
 
 async function refreshNews() {
   const d = await load('/dashboard/news');
-  const container = document.getElementById('newsList');
-  if (!d || !d.length) { container.innerHTML = '<div class="empty">No high-impact news in the next 24h ✅</div>'; return; }
-  container.innerHTML = d.map(e => {
-    const min = e.minutesTill;
-    const timeStr = min > 0
-      ? `in ${Math.ceil(min)}m`
-      : `${Math.abs(Math.floor(min))}m ago`;
-    const soon = min > 0 && min < 45;
-    return `<div class="news-item">
-      <div>
-        <div class="news-title">${e.title} <span style="color:var(--muted)">(${e.country})</span></div>
-        <div style="color:var(--muted);font-size:11px;margin-top:2px">${new Date(e.date).toLocaleTimeString()} UTC${e.forecast ? ' · Forecast: ' + e.forecast : ''}${e.previous ? ' · Prev: ' + e.previous : ''}</div>
-      </div>
-      <div class="news-time ${soon ? 'soon' : ''}">${soon ? '⚠️ ' : ''}${timeStr}</div>
-    </div>`;
-  }).join('');
+  if (!d) return;
+  allNewsEvents = d;
+  renderNews();
 }
 
-async function refreshAll() {
+// ── Manual Trigger ───────────────────────────────────────────────────────────
+async function runTrigger() {
+  const btn = document.getElementById('triggerBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Running...';
+  btn.className = 'trigger-btn running';
+
+  try {
+    const res = await fetch('/dashboard/trigger', { method: 'POST' });
+    const d   = await res.json();
+    btn.textContent = d.ok ? '✅ Done' : '❌ Failed';
+    btn.className   = d.ok ? 'trigger-btn done' : 'trigger-btn';
+    if (d.ok) {
+      setTimeout(() => refreshLatestAnalysis(), 1000);
+      setTimeout(() => refreshSmc(), 1500);
+    }
+  } catch {
+    btn.textContent = '❌ Error';
+    btn.className   = 'trigger-btn';
+  }
+
+  setTimeout(() => {
+    btn.disabled    = false;
+    btn.textContent = '⚡ Run Analysis';
+    btn.className   = 'trigger-btn';
+  }, 4000);
+}
+
+// ── Refresh cycles ───────────────────────────────────────────────────────────
+async function refreshFast() {
   await Promise.all([refreshSummary(), refreshPositions(), refreshApprovals()]);
 }
 async function refreshSlow() {
-  await Promise.all([refreshSmc(), refreshTrades(), refreshNews()]);
+  await Promise.all([refreshSmc(), refreshTrades(), refreshNews(), refreshStats(), refreshLatestAnalysis()]);
 }
 
-// Initial load
-refreshAll();
+// Boot
+refreshFast();
 refreshSlow();
-
-// Fast refresh: summary + positions + approvals every 5s
-setInterval(refreshAll, 5_000);
-// Slow refresh: SMC + trades + news every 30s
-setInterval(refreshSlow, 30_000);
+setInterval(refreshFast, 5_000);   // every 5s
+setInterval(refreshSlow, 30_000);  // every 30s
 </script>
 </body>
 </html>

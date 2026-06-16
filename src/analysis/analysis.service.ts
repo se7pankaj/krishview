@@ -36,16 +36,18 @@ export class AnalysisService {
   ) {}
 
   async run(
-    htfCandles: Candle[],
-    ltfCandles:  Candle[],
-    symbol:      string,
+    d1Candles:  Candle[],   // D1  — macro direction
+    h1Candles:  Candle[],   // H1  — structural confirmation
+    m15Candles: Candle[],   // M15 — setup confirmation
+    m5Candles:  Candle[],   // M5  — entry timing
+    symbol:     string,
   ): Promise<AnalysisResult | null> {
-    // 1. SMC analysis
-    const smcSignal = this.smc.analyze(htfCandles, ltfCandles);
+    // 1. SMC analysis — D1 bias, H1 structure, M5 entry
+    const smcSignal = this.smc.analyze(d1Candles, h1Candles, m15Candles, m5Candles);
     this.logger.log(`Analysis: SMC signal = ${smcSignal?.direction ?? 'none'}`);
 
     // 2. Feature engine (always runs, even if no SMC signal)
-    const features = this.featureEngine.compute(htfCandles, ltfCandles, smcSignal, symbol);
+    const features = this.featureEngine.compute(d1Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol);
 
     // 3. AI reasoning
     const recommendation = await this.aiReasoning.analyze(features, smcSignal);

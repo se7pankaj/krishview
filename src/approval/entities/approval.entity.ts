@@ -52,16 +52,27 @@ export class Approval {
   @Column({ nullable: true })
   telegramChatId: string;
 
-  /** When the approval request expires */
+  /** When the approval request expires (default: 15 min — doc §14.4, FR-015) */
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt: Date;
 
   @Column({ default: 'PENDING' })
   status: ApprovalStatus;
 
+  /** Exact timestamp when human made the approve/reject decision (doc §17.4) */
+  @Column({ type: 'timestamptz', nullable: true })
+  decisionAt: Date;
+
   /** Who approved/rejected (always 'telegram' for now) */
   @Column({ nullable: true })
   decidedBy: string;
+
+  /**
+   * Optional rejection reason captured after REJECT tap (doc §14.3).
+   * Values: TOO_RISKY | WRONG_TIMING | NOT_CONFIDENT | NEWS_RISK | OTHER
+   */
+  @Column({ length: 100, nullable: true })
+  rejectionReason: string;
 
   @CreateDateColumn()
   createdAt: Date;

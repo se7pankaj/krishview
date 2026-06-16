@@ -22,4 +22,8 @@ export class AnalyticsController {
 
   @Get('equity')
   async equity() { return this.analytics.equityCurve(); }
+
+  /** FR-028, doc §20.3 — Win rate by SMC feature combination */
+  @Get('feature-combos')
+  async featureCombos() { return this.analytics.featureCombinationStats(); }
 }

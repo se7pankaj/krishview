@@ -5,7 +5,8 @@
  * Sprint 4.1 additions: /approvals, /news, /analytics
  */
 
-import { Controller, Get, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Logger, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { JournalService } from '../journal/journal.service';
 import { Mt5Service, Position } from '../mt5/mt5.service';
 import { SmcService } from '../smc/smc.service';
@@ -76,28 +77,35 @@ export class DashboardController {
     return this.journal.getAllTimeStats();
   }
 
-  /** Live SMC state */
+  /** Live SMC state — 4-layer: D1 → H1 → M15 → M5 */
   @Get('smc')
   async smcState() {
-    const symbol  = this.config.get<string>('SYMBOL', 'XAUUSD');
-    const htfTf   = this.config.get<string>('HTF_TF', 'H4');
-    const entryTf = this.config.get<string>('ENTRY_TF', 'M15');
+    const symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
+    const htfTf     = this.config.get<string>('HTF_TF',     'D1');
+    const confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
+    const setupTf   = this.config.get<string>('SETUP_TF',   'M15');
+    const entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
 
     try {
-      const [htf, ltf] = await Promise.all([
-        this.mt5.getCandles(htfTf, 150, symbol),
-        this.mt5.getCandles(entryTf, 150, symbol),
+      const [d1, h1, m15, m5] = await Promise.all([
+        this.mt5.getCandles(htfTf,     200, symbol),
+        this.mt5.getCandles(confirmTf, 200, symbol),
+        this.mt5.getCandles(setupTf,   200, symbol),
+        this.mt5.getCandles(entryTf,   200, symbol),
       ]);
 
-      const bias   = this.smc.getHTFBias(htf);
-      const obs    = this.smc.detectOrderBlocks(ltf);
-      const fvgs   = this.smc.detectFVGs(ltf);
-      const sweeps = this.smc.detectLiquiditySweeps(ltf);
-      const pd     = this.smc.premiumDiscount(ltf);
-      const signal = this.smc.analyze(htf, ltf);
+      const bias   = this.smc.getHTFBias(d1);
+      const obs    = this.smc.detectOrderBlocks(m15);
+      const fvgs   = this.smc.detectFVGs(m15);
+      const sweeps = this.smc.detectLiquiditySweeps(m5);
+      const pd     = this.smc.premiumDiscount(m15);
+      const h1Structs = this.smc.detectStructure(h1);
+      const signal = this.smc.analyze(d1, h1, m15, m5);
 
       return {
         bias,
+        h1Bos:      h1Structs.some(s => s.type === 'BOS'),
+        h1Choch:    h1Structs.some(s => s.type === 'CHoCH'),
         obCount:    obs.length,
         fvgCount:   fvgs.length,
         sweepCount: sweeps.filter(s => s.swept).length,
@@ -139,9 +147,67 @@ export class DashboardController {
     return this.news.getUpcoming(24);
   }
 
-  /** Trigger manual analysis cycle */
+  /** POST /dashboard/trigger — run a fresh analysis cycle immediately */
   @Get('trigger')
+  async triggerGet() {
+    return { message: 'Send POST /dashboard/trigger to run a manual analysis cycle' };
+  }
+
+  /** POST /dashboard/trigger — run a fresh analysis cycle immediately */
+  @Post('trigger')
   async trigger() {
-    return { message: 'Use POST /webhook with action BUY/SELL to trigger analysis' };
+    const symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
+    const htfTf     = this.config.get<string>('HTF_TF',     'D1');
+    const confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
+    const setupTf   = this.config.get<string>('SETUP_TF',   'M15');
+    const entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
+
+    try {
+      const [d1, h1, m15, m5] = await Promise.all([
+        this.mt5.getCandles(htfTf,     200, symbol),
+        this.mt5.getCandles(confirmTf, 200, symbol),
+        this.mt5.getCandles(setupTf,   200, symbol),
+        this.mt5.getCandles(entryTf,   200, symbol),
+      ]);
+
+      const result = await this.analysis.run(d1, h1, m15, m5, symbol);
+      return { ok: true, direction: result?.smcSignal?.direction ?? null, timestamp: new Date().toISOString() };
+    } catch (e: any) {
+      return { ok: false, error: e.message };
+    }
+  }
+
+  // ─── Journal APIs (doc §18.3, FR-022 to FR-026) ──────────────────────────
+
+  /** GET /dashboard/journal — all trades (doc §18.3) */
+  @Get('journal')
+  async journalAll() {
+    return this.journal.getAll(200);
+  }
+
+  /** GET /dashboard/journal/stats — all-time performance stats (doc §18.3) */
+  @Get('journal/stats')
+  async journalStats() {
+    return this.journal.getAllTimeStats();
+  }
+
+  /**
+   * GET /dashboard/journal/export — CSV download of all closed trades (FR-026, doc §18.3).
+   * Sets Content-Disposition so the browser triggers a file download.
+   */
+  @Get('journal/export')
+  async journalExport(@Res() res: Response) {
+    const csv      = await this.journal.exportCsv();
+    const filename = `krishview-trades-${new Date().toISOString().slice(0, 10)}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  }
+
+  /** GET /dashboard/analysis/latest — most recent analysis record (doc §18.2) */
+  @Get('analysis/latest')
+  async analysisLatest() {
+    return this.analysis.getLatest();
   }
 }

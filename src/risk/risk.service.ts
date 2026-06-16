@@ -11,6 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { JournalService } from '../journal/journal.service';
 import { NewsService } from '../news/news.service';
 import { SMCSignal } from '../smc/smc.service';
+import { TelegramService } from '../telegram.service';
 
 // XAUUSD: 1 standard lot = 100 oz → $10/pip × 10 pts per price unit
 const XAUUSD_PIP_VALUE_PER_LOT = 10;
@@ -29,22 +30,32 @@ export interface PartialTP {
 export class RiskService {
   private readonly logger = new Logger(RiskService.name);
 
+  /**
+   * Circuit breaker suspend state (doc §16.2, §16.3).
+   * When set, all new signals are blocked until this timestamp.
+   * Persisted in-memory only — resets on server restart (intentional for safety).
+   */
+  private suspendedUntil: Date | null = null;
+
   constructor(
-    private readonly config:  ConfigService,
-    private readonly journal: JournalService,
-    private readonly news:    NewsService,
+    private readonly config:   ConfigService,
+    private readonly journal:  JournalService,
+    private readonly news:     NewsService,
+    private readonly telegram: TelegramService,
   ) {}
 
-  private get riskPct():      number { return parseFloat(this.config.get('RISK_PCT', '1')); }
-  private get maxDailyLoss(): number { return parseFloat(this.config.get('MAX_DAILY_LOSS_PCT', '3')); }
-  private get maxTrades():    number { return parseInt(this.config.get('MAX_TRADES', '3'), 10); }
-  private get minRR():        number { return parseFloat(this.config.get('MIN_RR', '2')); }
-  private get spreadLimit():  number { return parseInt(this.config.get('SPREAD_LIMIT', '30'), 10); }
-  private get confidenceMin():number { return parseFloat(this.config.get('CONFIDENCE_THRESHOLD', '60')); }
-  private get londonStart():  number { return parseInt(this.config.get('LONDON_START', '7'), 10); }
-  private get londonEnd():    number { return parseInt(this.config.get('LONDON_END', '16'), 10); }
-  private get nyStart():      number { return parseInt(this.config.get('NY_START', '12'), 10); }
-  private get nyEnd():        number { return parseInt(this.config.get('NY_END', '21'), 10); }
+  private get riskPct():           number { return parseFloat(this.config.get('RISK_PCT', '1')); }
+  private get maxDailyLoss():      number { return parseFloat(this.config.get('MAX_DAILY_LOSS_PCT', '3')); }
+  private get maxTrades():         number { return parseInt(this.config.get('MAX_TRADES', '3'), 10); }
+  private get minRR():             number { return parseFloat(this.config.get('MIN_RR', '2')); }
+  private get spreadLimit():       number { return parseInt(this.config.get('SPREAD_LIMIT', '30'), 10); }
+  private get confidenceMin():     number { return parseFloat(this.config.get('CONFIDENCE_THRESHOLD', '60')); }
+  private get londonStart():       number { return parseInt(this.config.get('LONDON_START', '7'), 10); }
+  private get londonEnd():         number { return parseInt(this.config.get('LONDON_END', '16'), 10); }
+  private get nyStart():           number { return parseInt(this.config.get('NY_START', '12'), 10); }
+  private get nyEnd():             number { return parseInt(this.config.get('NY_END', '21'), 10); }
+  private get maxConsecLosses():   number { return parseInt(this.config.get('MAX_CONSEC_LOSSES', '3'), 10); }
+  private get consecPausHours():   number { return parseInt(this.config.get('CONSEC_PAUSE_HOURS', '24'), 10); }
 
   /** Is the current UTC time within London or NY session? */
   isAllowedSession(): boolean {
@@ -86,13 +97,23 @@ export class RiskService {
     return rounded;
   }
 
-  /** Full pre-trade risk gate */
+  /** Full pre-trade risk gate (doc §16.1, §16.2) */
   async riskCheck(
     signal: SMCSignal,
     account: { balance: number; equity: number },
     openTradeCount: number,
     spread: number,
   ): Promise<RiskCheckResult> {
+    // 0. Circuit breaker suspension (consecutive losses or daily loss — doc §16.2, §16.3)
+    if (this.suspendedUntil && new Date() < this.suspendedUntil) {
+      const remaining = Math.ceil((this.suspendedUntil.getTime() - Date.now()) / 60_000);
+      return { ok: false, reason: `Trading suspended — circuit breaker active (${remaining} min remaining)` };
+    } else if (this.suspendedUntil) {
+      this.suspendedUntil = null; // suspension expired
+      this.logger.log('Risk: Circuit breaker suspension lifted — trading resumed');
+      await this.telegram.sendMessage('✅ <b>Circuit Breaker Lifted</b>\n\nTrading has automatically resumed. Monitor closely.');
+    }
+
     // 1. Session
     if (!this.isAllowedSession()) {
       return { ok: false, reason: 'Outside allowed trading sessions' };
@@ -119,25 +140,70 @@ export class RiskService {
       return { ok: false, reason: `RR too low: ${signal.rr} < ${this.minRR}` };
     }
 
-    // 5. Daily loss circuit breaker
+    // 5. Daily loss circuit breaker (doc §16.3)
     const dailyPnL = await this.journal.getDailyPnL();
     const lossPct  = Math.abs(Math.min(0, dailyPnL)) / account.balance * 100;
     if (lossPct >= this.maxDailyLoss) {
-      return {
-        ok: false,
-        reason: `Daily loss limit hit: ${lossPct.toFixed(2)}% ≥ ${this.maxDailyLoss}%`,
-      };
+      await this.suspendTrading(
+        `Daily loss limit hit: ${lossPct.toFixed(2)}% ≥ ${this.maxDailyLoss}%`,
+        '🔴 <b>Daily Loss Limit Hit</b>\n\nLoss: ' + lossPct.toFixed(2) + `% of account balance.\nTrading suspended until tomorrow 09:00 UTC.\n\nStay disciplined. Tomorrow is a new day.`,
+        'tomorrow',
+      );
+      return { ok: false, reason: `Daily loss limit hit: ${lossPct.toFixed(2)}% ≥ ${this.maxDailyLoss}%` };
     }
 
-    // 6. Confidence
+    // 6. Consecutive loss circuit breaker (doc §16.2)
+    const consecLosses = await this.journal.getConsecutiveLosses();
+    if (consecLosses >= this.maxConsecLosses) {
+      const pauseHours = this.consecPausHours;
+      await this.suspendTrading(
+        `${consecLosses} consecutive losses — pausing ${pauseHours}h`,
+        `⚠️ <b>Consecutive Loss Limit</b>\n\n${consecLosses} losses in a row.\nTrading paused for ${pauseHours} hours.\n\nReview your setup before resuming.`,
+        `${pauseHours}h`,
+      );
+      return { ok: false, reason: `${consecLosses} consecutive losses — paused ${pauseHours}h` };
+    }
+
+    // 7. Confidence
     if (signal.confidence < this.confidenceMin) {
       return { ok: false, reason: `Confidence too low: ${signal.confidence}% < ${this.confidenceMin}%` };
     }
 
     this.logger.log(
-      `Risk: All checks passed ✅ | RR:${signal.rr} Spread:${spread} DailyLoss:${lossPct.toFixed(2)}%`,
+      `Risk: All checks passed ✅ | RR:${signal.rr} Spread:${spread} DailyLoss:${lossPct.toFixed(2)}% ConsecLosses:${consecLosses}`,
     );
     return { ok: true, reason: 'OK' };
+  }
+
+  /**
+   * Suspend trading for a duration and send Telegram alert (doc §16.3).
+   * @param logReason  Console log message
+   * @param tgMessage  Telegram HTML message
+   * @param duration   'tomorrow' (next 09:00 UTC) or '24h' / '4h' etc.
+   */
+  private async suspendTrading(logReason: string, tgMessage: string, duration: string): Promise<void> {
+    if (duration === 'tomorrow') {
+      const resume = new Date();
+      resume.setUTCDate(resume.getUTCDate() + 1);
+      resume.setUTCHours(9, 0, 0, 0);
+      this.suspendedUntil = resume;
+    } else {
+      const hours = parseInt(duration, 10) || 24;
+      this.suspendedUntil = new Date(Date.now() + hours * 3_600_000);
+    }
+
+    this.logger.warn(`Risk: SUSPENDED — ${logReason}`);
+    try {
+      await this.telegram.sendMessage(tgMessage);
+    } catch { /* non-fatal */ }
+  }
+
+  /** Returns current suspension state — for dashboard/health checks */
+  getSuspensionState(): { suspended: boolean; until: string | null } {
+    if (this.suspendedUntil && new Date() < this.suspendedUntil) {
+      return { suspended: true, until: this.suspendedUntil.toISOString() };
+    }
+    return { suspended: false, until: null };
   }
 
   /** ATR-based trailing stop — only moves in the profitable direction */

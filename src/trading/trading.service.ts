@@ -23,6 +23,8 @@ export class TradingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(TradingService.name);
   private readonly symbol: string;
   private readonly htfTf: string;
+  private readonly confirmTf: string;
+  private readonly setupTf: string;
   private readonly entryTf: string;
   private lastDailyReport = -1;
 
@@ -39,9 +41,11 @@ export class TradingService implements OnApplicationBootstrap {
     private readonly explainer: ConfidenceExplainerService,
     private readonly news:      NewsService,
   ) {
-    this.symbol  = this.config.get<string>('SYMBOL', 'XAUUSD');
-    this.htfTf   = this.config.get<string>('HTF_TF', 'H4');
-    this.entryTf = this.config.get<string>('ENTRY_TF', 'M15');
+    this.symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
+    this.htfTf     = this.config.get<string>('HTF_TF',     'D1');
+    this.confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
+    this.setupTf   = this.config.get<string>('SETUP_TF',   'M15');
+    this.entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
   }
 
   async onApplicationBootstrap(): Promise<void> {
@@ -110,19 +114,21 @@ export class TradingService implements OnApplicationBootstrap {
   async executeSMCCycle(hintDirection?: 'BUY' | 'SELL'): Promise<void> {
     this.logger.log(`SMC Cycle starting — ${this.symbol}`);
 
-    // 1. Candles
-    const [htfCandles, ltfCandles] = await Promise.all([
-      this.mt5.getCandles(this.htfTf, 200, this.symbol),
-      this.mt5.getCandles(this.entryTf, 150, this.symbol),
+    // 1. Candles — 4-layer top-down: D1 → H1 → M15 → M5
+    const [htfCandles, confirmCandles, setupCandles, entryCandles] = await Promise.all([
+      this.mt5.getCandles(this.htfTf,     200, this.symbol),  // D1  — macro bias
+      this.mt5.getCandles(this.confirmTf, 200, this.symbol),  // H1  — structure
+      this.mt5.getCandles(this.setupTf,   200, this.symbol),  // M15 — setup confirmation
+      this.mt5.getCandles(this.entryTf,   200, this.symbol),  // M5  — entry trigger
     ]);
 
-    if (!htfCandles?.length || !ltfCandles?.length) {
+    if (!htfCandles?.length || !confirmCandles?.length || !setupCandles?.length || !entryCandles?.length) {
       this.logger.warn('SMC Cycle: no candle data from bridge');
       return;
     }
 
     // 2. Full analysis (SMC + FeatureEngine + AI)
-    const result = await this.analysis.run(htfCandles, ltfCandles, this.symbol);
+    const result = await this.analysis.run(htfCandles, confirmCandles, setupCandles, entryCandles, this.symbol);
     if (!result) {
       this.logger.log('SMC Cycle: no actionable signal');
       return;
@@ -289,6 +295,31 @@ export class TradingService implements OnApplicationBootstrap {
 
         await this.journal.logExit({ ticket: trade.ticket, exitPrice, pnl, closeReason });
         await this.telegram.notifyExit(trade.ticket, trade.direction, exitPrice, pnl, closeReason);
+        continue;
+      }
+
+      // ── Max Hold Time auto-close (doc §15.2) ─────────────────────────────
+      const maxHoldHours = parseInt(this.config.get('MAX_HOLD_HOURS', '24'), 10);
+      const openTime = trade.openTime ? new Date(trade.openTime) : null;
+      if (openTime && (Date.now() - openTime.getTime()) > maxHoldHours * 3_600_000) {
+        try {
+          const tick = await this.mt5.getPrice(this.symbol);
+          const exitPrice = trade.direction === 'BUY' ? tick.bid : tick.ask;
+          await this.mt5.closePosition(trade.ticket);
+          const pnl = (trade.direction === 'BUY'
+            ? exitPrice - Number(trade.entryPrice)
+            : Number(trade.entryPrice) - exitPrice) * Number(trade.lots) * 100;
+          await this.journal.logExit({ ticket: trade.ticket, exitPrice, pnl: +pnl.toFixed(2), closeReason: 'MAX_HOLD_TIME' });
+          await this.telegram.sendMessage(
+            `⏰ <b>Max Hold Time Reached</b> — #${trade.ticket}\n` +
+            `${trade.direction} ${trade.lots} lots @ ${trade.entryPrice}\n` +
+            `Auto-closed at ${exitPrice} after ${maxHoldHours}h\n` +
+            `P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`,
+          );
+          this.logger.warn(`Max hold time exceeded — auto-closed #${trade.ticket}`);
+        } catch (e: any) {
+          this.logger.error(`Max hold time close failed #${trade.ticket}: ${e.message}`);
+        }
         continue;
       }
 

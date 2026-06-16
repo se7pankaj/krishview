@@ -101,7 +101,7 @@ export class ApprovalService {
       return null;
     }
 
-    await this.repo.update(approvalId, { status: decision, decidedBy: 'telegram' });
+    await this.repo.update(approvalId, { status: decision, decidedBy: 'telegram', decisionAt: new Date() });
 
     const resolver = this.resolvers.get(approvalId);
     if (resolver) {

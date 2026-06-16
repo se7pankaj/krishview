@@ -1,12 +1,11 @@
 /**
  * news/news.service.ts — Forex Factory News Engine
  * ==================================================
- * Fetches the weekly high-impact economic calendar from Forex Factory's
- * free JSON endpoint. Blocks trading within a configurable window
- * before/after high-impact events (NFP, CPI, FOMC, etc.).
+ * Fetches the full weekly economic calendar from Forex Factory's
+ * free JSON endpoint. Shows ALL impact levels on dashboard (High/Medium/Low).
+ * Trade blocking only applies to High-impact USD/XAU events.
  *
  * No API key required. Cache refreshes once per hour.
- * Adds /dashboard/news endpoint so you can see upcoming events on dashboard.
  */
 
 import { Injectable, Logger } from '@nestjs/common';
@@ -16,13 +15,14 @@ import axios from 'axios';
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface NewsEvent {
-  title:      string;
-  country:    string;
-  date:       string;         // ISO string
-  impact:     'High' | 'Medium' | 'Low' | 'Holiday';
-  forecast:   string;
-  previous:   string;
-  minutesTill: number;        // negative = in the past
+  title:       string;
+  country:     string;
+  date:        string;          // ISO string
+  impact:      'High' | 'Medium' | 'Low' | 'Holiday';
+  forecast:    string;
+  previous:    string;
+  actual:      string;          // populated after event fires
+  minutesTill: number;          // negative = in the past
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -31,16 +31,16 @@ export interface NewsEvent {
 export class NewsService {
   private readonly logger = new Logger(NewsService.name);
 
-  // In-memory cache
-  private cachedEvents: NewsEvent[] = [];
-  private cacheExpiry  = 0;
+  // Raw cache (all events, all impacts, all currencies)
+  private rawCache:    any[]  = [];
+  private cacheExpiry = 0;
 
   /** FF free JSON — publishes this-week's calendar. No auth needed. */
   private readonly FF_URL =
     'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 
-  /** High-impact currencies we care about for XAUUSD */
-  private readonly RELEVANT_COUNTRIES = ['USD', 'XAU', 'US'];
+  /** Currencies relevant to XAUUSD for trade-blocking */
+  private readonly BLOCK_COUNTRIES = ['USD', 'XAU', 'US'];
 
   constructor(private readonly config: ConfigService) {}
 
@@ -51,74 +51,60 @@ export class NewsService {
     return parseInt(this.config.get('NEWS_BLOCK_AFTER_MIN', '15'), 10);
   }
 
-  // ─── Fetch & cache ─────────────────────────────────────────────────────────
+  // ─── Raw fetch & cache ─────────────────────────────────────────────────────
 
-  async fetchEvents(): Promise<NewsEvent[]> {
+  private async fetchRaw(): Promise<any[]> {
     const now = Date.now();
-    if (now < this.cacheExpiry && this.cachedEvents.length) {
-      return this.cachedEvents;
-    }
+    if (now < this.cacheExpiry && this.rawCache.length) return this.rawCache;
 
     try {
       const resp = await axios.get<any[]>(this.FF_URL, { timeout: 10_000 });
-      const raw  = resp.data ?? [];
-
-      this.cachedEvents = raw
-        .filter((e: any) => e.impact === 'High')
-        .filter((e: any) =>
-          this.RELEVANT_COUNTRIES.some(c =>
-            (e.country ?? '').toUpperCase().includes(c),
-          ),
-        )
-        .map((e: any) => {
-          const eventDate  = new Date(e.date);
-          const minutesTill = (eventDate.getTime() - now) / 60_000;
-          return {
-            title:      e.title ?? 'Unknown',
-            country:    e.country ?? '',
-            date:       eventDate.toISOString(),
-            impact:     e.impact,
-            forecast:   e.forecast ?? '',
-            previous:   e.previous ?? '',
-            minutesTill: +minutesTill.toFixed(1),
-          };
-        })
-        .filter((e: NewsEvent) => e.minutesTill > -120); // drop events > 2h ago
-
-      // Cache for 1 hour
-      this.cacheExpiry = now + 60 * 60 * 1000;
-      this.logger.log(`News cache refreshed — ${this.cachedEvents.length} high-impact USD events this week`);
+      this.rawCache    = resp.data ?? [];
+      this.cacheExpiry = now + 60 * 60 * 1000; // cache 1 hour
+      this.logger.log(`News cache refreshed — ${this.rawCache.length} total events this week`);
     } catch (e: any) {
-      this.logger.warn(`News fetch failed: ${e.message} — trading allowed (fail-open)`);
-      // Fail open: if we can't reach Forex Factory, don't block trading
+      this.logger.warn(`News fetch failed: ${e.message} — using stale cache (fail-open)`);
     }
 
-    return this.cachedEvents;
+    return this.rawCache;
   }
 
-  // ─── Core gate ─────────────────────────────────────────────────────────────
+  /** Convert raw FF event to NewsEvent with live minutesTill */
+  private toEvent(e: any): NewsEvent {
+    const eventDate   = new Date(e.date);
+    const minutesTill = (eventDate.getTime() - Date.now()) / 60_000;
+    return {
+      title:       e.title    ?? 'Unknown',
+      country:     e.country  ?? '',
+      date:        eventDate.toISOString(),
+      impact:      e.impact   ?? 'Low',
+      forecast:    e.forecast ?? '',
+      previous:    e.previous ?? '',
+      actual:      e.actual   ?? '',
+      minutesTill: +minutesTill.toFixed(1),
+    };
+  }
 
-  /**
-   * Returns true if we are within the news window of a high-impact event.
-   * Caller should check this and block trading if true.
-   */
+  // ─── Core gate (trade blocking — High USD/XAU only) ────────────────────────
+
   async isNewsWindow(): Promise<{ blocked: boolean; reason: string }> {
-    const events = await this.fetchEvents();
-    const now    = Date.now();
+    const raw = await this.fetchRaw();
+    const now = Date.now();
 
-    for (const event of events) {
-      const eventDate   = new Date(event.date).getTime();
-      const minutesTill = (eventDate - now) / 60_000;
+    for (const e of raw) {
+      if (e.impact !== 'High') continue;
+      if (!this.BLOCK_COUNTRIES.some(c => (e.country ?? '').toUpperCase().includes(c))) continue;
+
+      const minutesTill = (new Date(e.date).getTime() - now) / 60_000;
       const minutesPast = -minutesTill;
 
-      // Block window: 30 min before → 15 min after
       if (minutesTill > 0 && minutesTill <= this.blockBefore) {
-        const reason = `High-impact news in ${Math.ceil(minutesTill)} min: ${event.title} (${event.country})`;
+        const reason = `High-impact news in ${Math.ceil(minutesTill)} min: ${e.title} (${e.country})`;
         this.logger.warn(`News block: ${reason}`);
         return { blocked: true, reason };
       }
       if (minutesPast >= 0 && minutesPast <= this.blockAfter) {
-        const reason = `High-impact news ${Math.ceil(minutesPast)} min ago: ${event.title} — waiting for volatility to settle`;
+        const reason = `High-impact news ${Math.ceil(minutesPast)} min ago: ${e.title} — volatility window`;
         this.logger.warn(`News block (post): ${reason}`);
         return { blocked: true, reason };
       }
@@ -127,11 +113,31 @@ export class NewsService {
     return { blocked: false, reason: '' };
   }
 
-  /** Get upcoming high-impact events for dashboard display */
+  /**
+   * Get ALL upcoming events for dashboard display.
+   * All impact levels, all currencies.
+   * High-impact events near-term get a warning flag via minutesTill.
+   */
   async getUpcoming(hours = 24): Promise<NewsEvent[]> {
-    const events = await this.fetchEvents();
-    return events
-      .filter(e => e.minutesTill > -60 && e.minutesTill < hours * 60)
+    const raw = await this.fetchRaw();
+    const cutoffMin = hours * 60;
+
+    return raw
+      .map(e => this.toEvent(e))
+      .filter(e => e.impact !== 'Holiday')          // skip holidays
+      .filter(e => e.minutesTill > -120)            // drop events > 2h past
+      .filter(e => e.minutesTill < cutoffMin)       // within requested window
+      .sort((a, b) => a.minutesTill - b.minutesTill);
+  }
+
+  /** High-impact USD events only (used internally for trade blocking logic) */
+  async getHighImpactUsd(): Promise<NewsEvent[]> {
+    const raw = await this.fetchRaw();
+    return raw
+      .map(e => this.toEvent(e))
+      .filter(e => e.impact === 'High')
+      .filter(e => this.BLOCK_COUNTRIES.some(c => (e.country ?? '').toUpperCase().includes(c)))
+      .filter(e => e.minutesTill > -120)
       .sort((a, b) => a.minutesTill - b.minutesTill);
   }
 }

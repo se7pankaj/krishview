@@ -175,6 +175,51 @@ export class JournalService {
     };
   }
 
+  /**
+   * Export all closed trades as a CSV string (FR-026, doc §18.3).
+   * Caller is responsible for setting response headers.
+   */
+  async exportCsv(): Promise<string> {
+    const trades = await this.repo.find({ where: { status: 'CLOSED' }, order: { closeTime: 'ASC' } });
+
+    const header = [
+      'id', 'ticket', 'symbol', 'direction', 'lots',
+      'entryPrice', 'exitPrice', 'sl', 'tp',
+      'pnl', 'rrPlanned', 'rrActual', 'confidence',
+      'session', 'closeReason', 'openTime', 'closeTime',
+      'trailCount', 'partialTpHit', 'analysisId',
+    ].join(',');
+
+    const rows = trades.map(t => [
+      t.id, t.ticket, t.symbol, t.direction, t.lots,
+      t.entryPrice, t.exitPrice, t.sl, t.tp,
+      t.pnl, t.rrPlanned, t.rrActual, t.confidence,
+      t.session ?? '', t.closeReason ?? '',
+      t.openTime?.toISOString() ?? '',
+      t.closeTime?.toISOString() ?? '',
+      t.trailCount, t.partialTpHit ? 1 : 0,
+      t.analysisId ?? '',
+    ].join(','));
+
+    return [header, ...rows].join('\n');
+  }
+
+  /** Count consecutive losses from the most recent trades (doc §16.2) */
+  async getConsecutiveLosses(): Promise<number> {
+    const recent = await this.repo.find({
+      where: { status: 'CLOSED' },
+      order: { closeTime: 'DESC' },
+      take: 10,
+    });
+
+    let streak = 0;
+    for (const t of recent) {
+      if ((Number(t.pnl) || 0) <= 0) streak++;
+      else break;
+    }
+    return streak;
+  }
+
   private currentSession(): string {
     const h = new Date().getUTCHours();
     if (h >= 7 && h < 12)  return 'london';

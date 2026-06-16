@@ -190,21 +190,90 @@ export class AnalyticsService {
     });
   }
 
+  /**
+   * Win rate by SMC feature combination (FR-028, doc §20.3).
+   * Reads the smc_signal JSONB from the analyses table and joins to trade outcomes.
+   * Examples: "BOS+OB+Fib(50-61.8)+NoNews" → 74% win rate
+   */
+  async featureCombinationStats(): Promise<{
+    combo:   string;
+    total:   number;
+    wins:    number;
+    winRate: number;
+    avgPnl:  number;
+  }[]> {
+    // Pull closed trades with their linked analysis SMC signal
+    const rows = await this.db.query(`
+      SELECT
+        t.pnl,
+        a.smc_signal,
+        a.features
+      FROM trades t
+      JOIN analyses a ON a.id = t.analysis_id
+      WHERE t.status = 'CLOSED'
+        AND t.analysis_id IS NOT NULL
+        AND a.smc_signal IS NOT NULL
+    `);
+
+    // Build combo key from SMC flags
+    const buckets: Record<string, { wins: number; total: number; pnlSum: number }> = {};
+
+    for (const row of rows) {
+      const smc  = row.smc_signal  ?? {};
+      const feat = row.features    ?? {};
+      const pnl  = parseFloat(row.pnl) || 0;
+
+      const parts: string[] = [];
+      if (smc.bos)              parts.push('BOS');
+      if (smc.choch)            parts.push('CHoCH');
+      if (smc.ob)               parts.push('OB');
+      if (smc.fvg)              parts.push('FVG');
+      if (smc.sweep?.swept)     parts.push('Sweep');
+      const zone: string = feat.fibonacci?.zone ?? '';
+      if (zone === '50-61.8%')  parts.push('Fib50-61.8');
+      else if (zone === '38.2-50%') parts.push('Fib38-50');
+      const newsMin = feat.news?.minutesUntilEvent;
+      if (newsMin == null || newsMin > 60) parts.push('NoNews');
+      else parts.push('NewsRisk');
+
+      if (parts.length === 0) continue;
+      const key = parts.join('+');
+
+      if (!buckets[key]) buckets[key] = { wins: 0, total: 0, pnlSum: 0 };
+      buckets[key].total++;
+      buckets[key].pnlSum += pnl;
+      if (pnl > 0) buckets[key].wins++;
+    }
+
+    return Object.entries(buckets)
+      .filter(([, b]) => b.total >= 2) // only show combos with 2+ trades
+      .map(([combo, b]) => ({
+        combo,
+        total:   b.total,
+        wins:    b.wins,
+        winRate: +((b.wins / b.total) * 100).toFixed(1),
+        avgPnl:  +(b.pnlSum / b.total).toFixed(2),
+      }))
+      .sort((a, b) => b.winRate - a.winRate);
+  }
+
   /** Full analytics bundle for the dashboard endpoint */
   async summary(): Promise<{
-    confidence: ConfidenceBracket[];
-    approvals:  ApprovalStats[];
-    smcReasons: SmcReasonStat[];
-    sessions:   SessionStat[];
-    equity:     EquityPoint[];
+    confidence:    ConfidenceBracket[];
+    approvals:     ApprovalStats[];
+    smcReasons:    SmcReasonStat[];
+    sessions:      SessionStat[];
+    equity:        EquityPoint[];
+    featureCombos: Awaited<ReturnType<typeof this.featureCombinationStats>>;
   }> {
-    const [confidence, approvals, smcReasons, sessions, equity] = await Promise.all([
+    const [confidence, approvals, smcReasons, sessions, equity, featureCombos] = await Promise.all([
       this.confidenceBrackets().catch(() => []),
       this.approvalStats().catch(() => []),
       this.smcReasonStats().catch(() => []),
       this.sessionStats().catch(() => []),
       this.equityCurve().catch(() => []),
+      this.featureCombinationStats().catch(() => []),
     ]);
-    return { confidence, approvals, smcReasons, sessions, equity };
+    return { confidence, approvals, smcReasons, sessions, equity, featureCombos };
   }
 }

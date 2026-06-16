@@ -213,9 +213,12 @@ describe('premiumDiscount', () => {
 
 // ─── analyze (integration) ────────────────────────────────────────────────────
 
-describe('analyze', () => {
+describe('analyze (4-layer: D1, H1, M15, M5)', () => {
   it('returns null or a valid SMCSignal', () => {
-    const result = service.analyze(bullCandles(), flatCandles(2000, 150));
+    const result = service.analyze(
+      bullCandles(), flatCandles(2000, 200),
+      flatCandles(2000, 200), flatCandles(2000, 150),
+    );
     if (result !== null) {
       expect(['BUY', 'SELL']).toContain(result.direction);
       expect(result.confidence).toBeGreaterThanOrEqual(0);
@@ -226,9 +229,11 @@ describe('analyze', () => {
   });
 
   it('signal SL is on correct side of entry for BUY', () => {
-    // Run enough times we might get a BUY signal
     for (let attempt = 0; attempt < 3; attempt++) {
-      const result = service.analyze(bullCandles(1800 + attempt * 50), flatCandles(2000, 150));
+      const result = service.analyze(
+        bullCandles(1800 + attempt * 50), flatCandles(2000, 200),
+        flatCandles(2000, 200), flatCandles(2000, 150),
+      );
       if (result?.direction === 'BUY') {
         expect(result.sl).toBeLessThan(result.entryPrice);
         expect(result.tp).toBeGreaterThan(result.entryPrice);
@@ -239,7 +244,10 @@ describe('analyze', () => {
 
   it('signal SL is on correct side of entry for SELL', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const result = service.analyze(bearCandles(2200 + attempt * 50), flatCandles(2000, 150));
+      const result = service.analyze(
+        bearCandles(2200 + attempt * 50), flatCandles(2000, 200),
+        flatCandles(2000, 200), flatCandles(2000, 150),
+      );
       if (result?.direction === 'SELL') {
         expect(result.sl).toBeGreaterThan(result.entryPrice);
         expect(result.tp).toBeLessThan(result.entryPrice);

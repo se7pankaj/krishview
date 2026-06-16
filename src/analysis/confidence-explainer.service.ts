@@ -73,16 +73,16 @@ export class ConfidenceExplainerService {
     let score = 0;
     const reasons: string[] = [];
 
-    // HTF EMA stack aligned
-    if (f.htfTrend.aligned) {
+    // D1 EMA stack aligned (macro)
+    if (f.d1Trend.aligned) {
       score += 10;
-      reasons.push(`HTF EMA stack aligned (${f.htfTrend.direction})`);
+      reasons.push(`D1 EMA stack aligned (${f.d1Trend.direction})`);
     }
 
-    // LTF EMA stack aligned
-    if (f.ltfTrend.aligned) {
+    // H1 EMA stack aligned (structural confirmation — priority)
+    if (f.h1Trend.aligned) {
       score += 8;
-      reasons.push(`LTF EMA stack aligned (${f.ltfTrend.direction})`);
+      reasons.push(`H1 EMA stack aligned (${f.h1Trend.direction})`);
     }
 
     // HTF SMC bias matches direction

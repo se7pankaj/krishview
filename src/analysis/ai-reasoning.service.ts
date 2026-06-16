@@ -67,46 +67,50 @@ Respond ONLY with a valid JSON object — no prose, no markdown, no explanation 
   // ─── User prompt builder ──────────────────────────────────────────────────
 
   private buildPrompt(features: FeatureSet, smcSignal: SMCSignal | null): string {
-    const f = features;
-    const s = f.smc;
-    const m = f.momentum;
-    const h = f.htfTrend;
-    const l = f.ltfTrend;
+    const f   = features;
+    const s   = f.smc;
+    const m   = f.momentum;
     const fib = f.fibonacci;
+    const d1  = f.d1Trend;
+    const h1  = f.h1Trend;
+    const m15 = f.m15Trend;
+    const m5  = f.m5Trend;
 
     return `Instrument: ${f.symbol}
 Current Price: ${f.price}
 Timestamp: ${f.timestamp}
 
-=== MULTI-TIMEFRAME TREND ===
-H4 Trend:  ${h.direction.toUpperCase()} | EMA20=${h.ema20} EMA50=${h.ema50} EMA200=${h.ema200} | Aligned=${h.aligned}
-M15 Trend: ${l.direction.toUpperCase()} | EMA20=${l.ema20} EMA50=${l.ema50} EMA200=${l.ema200} | Aligned=${l.aligned}
-H4 EMA200 Distance: ${h.ema200Distance} ATR units
+=== 4-LAYER TOP-DOWN ANALYSIS ===
+[D1  — Direction / Macro Bias]
+Trend: ${d1.direction.toUpperCase()} | EMA20=${d1.ema20} EMA50=${d1.ema50} EMA200=${d1.ema200} | Aligned=${d1.aligned} | EMA200 Dist=${d1.ema200Distance} ATR
 
-=== MOMENTUM ===
-RSI(14): ${m.rsi} (${m.rsiZone})
-Bullish Divergence: ${m.bullishDivergence}
-Bearish Divergence: ${m.bearishDivergence}
+[H1  — Structural Confirmation (PRIORITY)]
+Trend: ${h1.direction.toUpperCase()} | EMA20=${h1.ema20} EMA50=${h1.ema50} EMA200=${h1.ema200} | Aligned=${h1.aligned}
+BOS Confirmed: ${s.bos} | CHoCH: ${s.choch} | Last BOS Direction: ${s.lastBosDirection ?? 'none'}
+Last Swing High: ${s.lastSwingHigh ?? 'n/a'} | Last Swing Low: ${s.lastSwingLow ?? 'n/a'}
+
+[M15 — Setup Confirmation]
+Trend: ${m15.direction.toUpperCase()} | EMA20=${m15.ema20} EMA50=${m15.ema50} | Aligned=${m15.aligned}
+Order Block: ${s.obPresent}${s.obPresent ? ` (${s.obLow}–${s.obHigh})` : ''} | FVG: ${s.fvgPresent}${s.fvgPresent ? ` (${s.fvgLow}–${s.fvgHigh})` : ''}
+Premium/Discount Zone: ${s.zone} (${s.zonePct}%)
+
+[M5  — Entry Trigger]
+Trend: ${m5.direction.toUpperCase()} | EMA20=${m5.ema20} EMA50=${m5.ema50} | Aligned=${m5.aligned}
+Liquidity Swept: ${s.liquiditySwept}
+
+=== MOMENTUM (H1) ===
+RSI(14): ${m.rsi} (${m.rsiZone}) | Slope: ${m.rsiTrend}
+Bullish Divergence: ${m.bullishDivergence} | Bearish Divergence: ${m.bearishDivergence}
 ATR(14): ${m.atr}
 
-=== SMART MONEY CONCEPTS ===
-HTF Bias:          ${s.bias}
-Break of Structure: ${s.bos}
-Change of Character: ${s.choch}
-Order Block Present: ${s.obPresent}${s.obPresent ? ` (${s.obLow}–${s.obHigh})` : ''}
-Fair Value Gap:      ${s.fvgPresent}${s.fvgPresent ? ` (${s.fvgLow}–${s.fvgHigh})` : ''}
-Liquidity Swept:     ${s.liquiditySwept}
-Premium/Discount:    ${s.zone} (${s.zonePct}%)
-
-=== FIBONACCI RETRACEMENT ===
-Swing High: ${fib.swingHigh}
-Swing Low:  ${fib.swingLow}
-Key Levels: 38.2%=${fib.level382} | 50%=${fib.level500} | 61.8%=${fib.level618}
+=== FIBONACCI RETRACEMENT (M15 swing) ===
+Swing High: ${fib.swingHigh} | Swing Low: ${fib.swingLow}
+38.2%=${fib.level382} | 50%=${fib.level500} | 61.8%=${fib.level618}
 Current Zone: ${fib.currentZone}
 
 === SMC ENGINE SIGNAL ===
 ${smcSignal
-  ? `Direction: ${smcSignal.direction} | Confidence: ${smcSignal.confidence}% | RR: ${smcSignal.rr}\nReasons: ${smcSignal.reasons.join(', ')}`
+  ? `Direction: ${smcSignal.direction} | Confidence: ${smcSignal.confidence}% | RR: ${smcSignal.rr}\nEntry: ${smcSignal.entryPrice} | SL: ${smcSignal.sl} | TP: ${smcSignal.tp}\nReasons: ${smcSignal.reasons.join(', ')}`
   : 'No clear SMC signal detected'
 }
 

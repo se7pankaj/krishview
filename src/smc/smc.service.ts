@@ -337,64 +337,91 @@ export class SmcService {
 
   // ─── 6. Main Confluent Analysis ───────────────────────────────────────────
 
-  analyze(htfCandles: Candle[], ltfCandles: Candle[]): SMCSignal | null {
-    const htfBias = this.getHTFBias(htfCandles);
-    this.logger.log(`SMC | HTF Bias: ${htfBias}`);
+  /**
+   * 4-layer top-down SMC analysis:
+   *   d1Candles  — macro direction / bias
+   *   h1Candles  — structural confirmation (BOS / CHoCH) — PRIORITY
+   *   m15Candles — setup confirmation (FVG / OB zone identification)
+   *   m5Candles  — entry timing (precise trigger)
+   */
+  analyze(
+    d1Candles:  Candle[],
+    h1Candles:  Candle[],
+    m15Candles: Candle[],
+    m5Candles:  Candle[],
+  ): SMCSignal | null {
+    // Layer 1: D1 macro bias
+    const htfBias = this.getHTFBias(d1Candles);
+    this.logger.log(`SMC | D1 Bias: ${htfBias}`);
     if (htfBias === 'NEUTRAL') return null;
 
-    const ltfStructs = this.detectStructure(ltfCandles, htfBias);
-    const obs        = this.detectOrderBlocks(ltfCandles);
-    const fvgs       = this.detectFVGs(ltfCandles);
-    const sweeps     = this.detectLiquiditySweeps(ltfCandles);
-    const pd         = this.premiumDiscount(ltfCandles);
-    const A          = this.atr(ltfCandles);
-    const price      = ltfCandles[ltfCandles.length - 1].close;
+    // Layer 2: H1 structural confirmation — must agree with D1 bias
+    const h1Structs = this.detectStructure(h1Candles, htfBias);
+    const h1BullStructs = h1Structs.filter(s => s.bias === 'BULLISH');
+    const h1BearStructs = h1Structs.filter(s => s.bias === 'BEARISH');
 
-    this.logger.log(`SMC | PD Zone: ${pd.zone} (${pd.pct}%) | ATR: ${A.toFixed(2)}`);
-    this.logger.log(`SMC | OBs: ${obs.length} | FVGs: ${fvgs.length} | Sweeps: ${sweeps.length}`);
+    // Layer 3: M15 setup — OB / FVG identification + premium/discount
+    const m15OBs   = this.detectOrderBlocks(m15Candles);
+    const m15FVGs  = this.detectFVGs(m15Candles);
+    const m15Pd    = this.premiumDiscount(m15Candles);
+    const m15ATR   = this.atr(m15Candles);
+
+    // Layer 4: M5 entry trigger — price, sweeps
+    const m5Sweeps = this.detectLiquiditySweeps(m5Candles);
+    const price    = m5Candles[m5Candles.length - 1].close;
+
+    this.logger.log(`SMC | M15 PD Zone: ${m15Pd.zone} (${m15Pd.pct}%) | ATR: ${m15ATR.toFixed(2)}`);
+    this.logger.log(`SMC | H1 BullStructs: ${h1BullStructs.length} | H1 BearStructs: ${h1BearStructs.length}`);
+    this.logger.log(`SMC | M15 OBs: ${m15OBs.length} | M15 FVGs: ${m15FVGs.length} | M5 Sweeps: ${m5Sweeps.length}`);
 
     let confidence = 30;
-    const reasons: string[] = [`HTF ${htfBias} Bias`];
-    const minRR = this.minRR;
+    const reasons: string[] = [`D1 ${htfBias} Bias`];
+    const minRR    = this.minRR;
     const threshold = this.confidenceThreshold;
 
     // ── LONG ────────────────────────────────────────────────────────────────
     if (htfBias === 'BULLISH') {
-      if (pd.zone !== 'discount') {
-        this.logger.log(`SMC LONG skip: price in ${pd.zone} zone`);
+      if (m15Pd.zone !== 'discount') {
+        this.logger.log(`SMC LONG skip: M15 price in ${m15Pd.zone} zone`);
         return null;
       }
-      reasons.push(`Discount Zone (${pd.pct}%)`);
+      reasons.push(`M15 Discount Zone (${m15Pd.pct}%)`);
       confidence += 15;
 
-      const bullStructs = ltfStructs.filter(s => s.bias === 'BULLISH');
-      if (bullStructs.length) {
-        const last = bullStructs[bullStructs.length - 1];
-        reasons.push(`LTF ${last.type} Bullish @ ${last.price}`);
-        confidence += 20;
+      // H1 BOS / CHoCH confirmation (PRIORITY layer)
+      if (h1BullStructs.length) {
+        const last = h1BullStructs[h1BullStructs.length - 1];
+        reasons.push(`H1 ${last.type} Bullish confirmed @ ${last.price}`);
+        confidence += 25;  // H1 confirmation carries extra weight
+      } else {
+        this.logger.log('SMC LONG: no H1 bullish structure — lower confidence');
+        confidence -= 10;
       }
 
-      const ob = [...obs].reverse().find(o =>
+      // M15 Order Block touch
+      const ob = [...m15OBs].reverse().find(o =>
         o.type === 'BULLISH_OB' && price >= o.low && price <= o.high * 1.003,
       );
       if (ob) {
-        reasons.push(`Bullish OB ${ob.low.toFixed(2)}–${ob.high.toFixed(2)} str:${ob.strength}`);
+        reasons.push(`M15 Bullish OB ${ob.low.toFixed(2)}–${ob.high.toFixed(2)} str:${ob.strength}`);
         confidence += 15 * ob.strength;
       }
 
-      const fvg = [...fvgs].reverse().find(f =>
+      // M15 FVG fill
+      const fvg = [...m15FVGs].reverse().find(f =>
         f.type === 'BULLISH_FVG' && price >= f.low && price <= f.high,
       );
       if (fvg) {
-        reasons.push(`Bullish FVG ${fvg.low.toFixed(2)}–${fvg.high.toFixed(2)}`);
+        reasons.push(`M15 Bullish FVG ${fvg.low.toFixed(2)}–${fvg.high.toFixed(2)}`);
         confidence += 10;
       }
 
-      const swept = sweeps.filter(s =>
+      // M5 liquidity sweep trigger
+      const swept = m5Sweeps.filter(s =>
         (s.type === 'equal_lows' || s.type === 'swing_low') && s.swept,
       );
       if (swept.length) {
-        reasons.push('Liquidity swept below (stop hunt done)');
+        reasons.push('M5 Liquidity swept below (stop hunt complete)');
         confidence += 10;
       }
 
@@ -402,8 +429,8 @@ export class SmcService {
       this.logger.log(`SMC LONG confidence: ${confidence}% — ${reasons.join(' | ')}`);
 
       if (confidence >= threshold && (ob || fvg)) {
-        const slBase = ob ? ob.low : (fvg ? fvg.low : price - A * 2);
-        const sl     = +(slBase - A * 0.5).toFixed(2);
+        const slBase = ob ? ob.low : (fvg ? fvg.low : price - m15ATR * 2);
+        const sl     = +(slBase - m15ATR * 0.5).toFixed(2);
         const risk   = price - sl;
         const tp     = +(price + risk * Math.max(minRR, 2)).toFixed(2);
         const rr     = +((tp - price) / (price - sl)).toFixed(2);
@@ -411,7 +438,7 @@ export class SmcService {
           direction: 'BUY', bias: 'BULLISH', entryPrice: +price.toFixed(2),
           sl, tp, rr, confidence: +confidence.toFixed(1), reasons,
           ob: ob ?? null, fvg: fvg ?? null,
-          structure: bullStructs[bullStructs.length - 1] ?? null,
+          structure: h1BullStructs[h1BullStructs.length - 1] ?? null,
           sweep: swept[swept.length - 1] ?? null,
         };
       }
@@ -419,41 +446,47 @@ export class SmcService {
 
     // ── SHORT ───────────────────────────────────────────────────────────────
     if (htfBias === 'BEARISH') {
-      if (pd.zone !== 'premium') {
-        this.logger.log(`SMC SHORT skip: price in ${pd.zone} zone`);
+      if (m15Pd.zone !== 'premium') {
+        this.logger.log(`SMC SHORT skip: M15 price in ${m15Pd.zone} zone`);
         return null;
       }
-      reasons.push(`Premium Zone (${pd.pct}%)`);
+      reasons.push(`M15 Premium Zone (${m15Pd.pct}%)`);
       confidence += 15;
 
-      const bearStructs = ltfStructs.filter(s => s.bias === 'BEARISH');
-      if (bearStructs.length) {
-        const last = bearStructs[bearStructs.length - 1];
-        reasons.push(`LTF ${last.type} Bearish @ ${last.price}`);
-        confidence += 20;
+      // H1 BOS / CHoCH confirmation (PRIORITY layer)
+      if (h1BearStructs.length) {
+        const last = h1BearStructs[h1BearStructs.length - 1];
+        reasons.push(`H1 ${last.type} Bearish confirmed @ ${last.price}`);
+        confidence += 25;
+      } else {
+        this.logger.log('SMC SHORT: no H1 bearish structure — lower confidence');
+        confidence -= 10;
       }
 
-      const ob = [...obs].reverse().find(o =>
+      // M15 Order Block touch
+      const ob = [...m15OBs].reverse().find(o =>
         o.type === 'BEARISH_OB' && price >= o.low && price <= o.high * 1.003,
       );
       if (ob) {
-        reasons.push(`Bearish OB ${ob.low.toFixed(2)}–${ob.high.toFixed(2)} str:${ob.strength}`);
+        reasons.push(`M15 Bearish OB ${ob.low.toFixed(2)}–${ob.high.toFixed(2)} str:${ob.strength}`);
         confidence += 15 * ob.strength;
       }
 
-      const fvg = [...fvgs].reverse().find(f =>
+      // M15 FVG fill
+      const fvg = [...m15FVGs].reverse().find(f =>
         f.type === 'BEARISH_FVG' && price >= f.low && price <= f.high,
       );
       if (fvg) {
-        reasons.push(`Bearish FVG ${fvg.low.toFixed(2)}–${fvg.high.toFixed(2)}`);
+        reasons.push(`M15 Bearish FVG ${fvg.low.toFixed(2)}–${fvg.high.toFixed(2)}`);
         confidence += 10;
       }
 
-      const swept = sweeps.filter(s =>
+      // M5 liquidity sweep trigger
+      const swept = m5Sweeps.filter(s =>
         (s.type === 'equal_highs' || s.type === 'swing_high') && s.swept,
       );
       if (swept.length) {
-        reasons.push('Liquidity swept above (stop hunt done)');
+        reasons.push('M5 Liquidity swept above (stop hunt complete)');
         confidence += 10;
       }
 
@@ -461,8 +494,8 @@ export class SmcService {
       this.logger.log(`SMC SHORT confidence: ${confidence}% — ${reasons.join(' | ')}`);
 
       if (confidence >= threshold && (ob || fvg)) {
-        const slBase = ob ? ob.high : (fvg ? fvg.high : price + A * 2);
-        const sl     = +(slBase + A * 0.5).toFixed(2);
+        const slBase = ob ? ob.high : (fvg ? fvg.high : price + m15ATR * 2);
+        const sl     = +(slBase + m15ATR * 0.5).toFixed(2);
         const risk   = sl - price;
         const tp     = +(price - risk * Math.max(minRR, 2)).toFixed(2);
         const rr     = +((price - tp) / (sl - price)).toFixed(2);
@@ -470,7 +503,7 @@ export class SmcService {
           direction: 'SELL', bias: 'BEARISH', entryPrice: +price.toFixed(2),
           sl, tp, rr, confidence: +confidence.toFixed(1), reasons,
           ob: ob ?? null, fvg: fvg ?? null,
-          structure: bearStructs[bearStructs.length - 1] ?? null,
+          structure: h1BearStructs[h1BearStructs.length - 1] ?? null,
           sweep: swept[swept.length - 1] ?? null,
         };
       }

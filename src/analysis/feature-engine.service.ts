@@ -4,22 +4,28 @@
  * Computes structured market features from raw OHLCV candles.
  * Output feeds directly into the GPT-4 structured prompt.
  *
+ * 4-layer top-down analysis:
+ *   D1  → Macro Direction (HTF bias)
+ *   H1  → Structural Confirmation (BOS / CHoCH)
+ *   M15 → Setup Confirmation (FVG / OB zone)
+ *   M5  → Entry Timing (precise trigger)
+ *
  * Features computed:
- *   • EMA 20 / 50 / 200 + alignment
- *   • RSI(14) + zone + divergence flag
+ *   • EMA 20 / 50 / 200 + alignment + EMA200 distance (ATR units)
+ *   • RSI(14) + zone + slope (rising/falling/flat) + divergence
  *   • ATR(14)
  *   • Fibonacci retracement levels + current zone
- *   • Multi-timeframe trend summary
+ *   • lastBosDirection, lastSwingHigh, lastSwingLow
  */
 
 import { Injectable } from '@nestjs/common';
-import { Candle, SmcService, SMCSignal } from '../smc/smc.service';
+import { Candle, SmcService, SMCSignal, StructureEvent } from '../smc/smc.service';
 
 // ─── Output Types ─────────────────────────────────────────────────────────────
 
 export interface TrendFeatures {
-  ema20: number;
-  ema50: number;
+  ema20:  number;
+  ema50:  number;
   ema200: number;
   /** All three EMAs stacked in same direction */
   aligned: boolean;
@@ -30,9 +36,11 @@ export interface TrendFeatures {
 }
 
 export interface MomentumFeatures {
-  rsi: number;
+  rsi:     number;
   /** 'overbought' >70 | 'oversold' <30 | 'neutral' */
   rsiZone: 'overbought' | 'oversold' | 'neutral';
+  /** RSI slope over last 5 periods — momentum acceleration / deceleration */
+  rsiTrend: 'rising' | 'falling' | 'flat';
   /** Bullish divergence: price lower low, RSI higher low */
   bullishDivergence: boolean;
   /** Bearish divergence: price higher high, RSI lower high */
@@ -42,7 +50,7 @@ export interface MomentumFeatures {
 
 export interface FibonacciFeatures {
   swingHigh: number;
-  swingLow: number;
+  swingLow:  number;
   level0:    number;   // 0%
   level236:  number;   // 23.6%
   level382:  number;   // 38.2%
@@ -58,23 +66,43 @@ export interface FeatureSet {
   symbol:    string;
   timestamp: string;
   price:     number;
-  htfTrend:  TrendFeatures;
-  ltfTrend:  TrendFeatures;
+
+  // ── 4-layer trend ──────────────────────────────────────────────────────────
+  /** D1 — Macro Direction */
+  d1Trend:     TrendFeatures;
+  /** H1 — Structural Confirmation (priority layer) */
+  h1Trend:     TrendFeatures;
+  /** M15 — Setup Confirmation */
+  m15Trend:    TrendFeatures;
+  /** M5 — Entry Timing */
+  m5Trend:     TrendFeatures;
+
   momentum:  MomentumFeatures;
   fibonacci: FibonacciFeatures;
+
   smc: {
-    bias:         string;
-    bos:          boolean;
-    choch:        boolean;
-    obPresent:    boolean;
-    obHigh:       number | null;
-    obLow:        number | null;
-    fvgPresent:   boolean;
-    fvgHigh:      number | null;
-    fvgLow:       number | null;
-    liquiditySwept: boolean;
-    zone:         string;
-    zonePct:      number;
+    bias:             string;
+    /** BOS detected on H1 confirmation layer */
+    bos:              boolean;
+    /** CHoCH detected on H1 confirmation layer */
+    choch:            boolean;
+    /** Direction of the most recent BOS on H1 */
+    lastBosDirection: 'bullish' | 'bearish' | null;
+    /** Price level of the last swing high on H1 */
+    lastSwingHigh:    number | null;
+    /** Price level of the last swing low on H1 */
+    lastSwingLow:     number | null;
+    /** OB from M15 setup layer */
+    obPresent:        boolean;
+    obHigh:           number | null;
+    obLow:            number | null;
+    /** FVG from M15 setup layer */
+    fvgPresent:       boolean;
+    fvgHigh:          number | null;
+    fvgLow:           number | null;
+    liquiditySwept:   boolean;
+    zone:             string;
+    zonePct:          number;
   };
 }
 
@@ -97,7 +125,7 @@ export class FeatureEngineService {
   }
 
   computeTrend(candles: Candle[], atr: number): TrendFeatures {
-    const price = candles[candles.length - 1].close;
+    const price  = candles[candles.length - 1].close;
     const ema20  = this.computeEMA(candles, 20);
     const ema50  = this.computeEMA(candles, 50);
     const ema200 = this.computeEMA(candles, 200);
@@ -136,8 +164,15 @@ export class FeatureEngineService {
     }
 
     if (avgLoss === 0) return 100;
-    const rs  = avgGain / avgLoss;
+    const rs = avgGain / avgLoss;
     return +(100 - 100 / (1 + rs)).toFixed(2);
+  }
+
+  private computeRSISeries(candles: Candle[], period: number): number[] {
+    return candles.map((_, i) => {
+      if (i < period) return 50;
+      return this.computeRSI(candles.slice(0, i + 1), period);
+    });
   }
 
   computeMomentum(candles: Candle[]): MomentumFeatures {
@@ -147,26 +182,27 @@ export class FeatureEngineService {
     const rsiZone: MomentumFeatures['rsiZone'] =
       rsi > 70 ? 'overbought' : rsi < 30 ? 'oversold' : 'neutral';
 
+    // RSI slope over last 5 periods (doc §10.2)
+    const rsiSeries = this.computeRSISeries(candles.slice(-10), 5);
+    const rsiFirst  = rsiSeries[rsiSeries.length - 5] ?? rsiSeries[0];
+    const rsiLast   = rsiSeries[rsiSeries.length - 1];
+    const rsiDelta  = rsiLast - rsiFirst;
+    const rsiTrend: MomentumFeatures['rsiTrend'] =
+      rsiDelta > 2 ? 'rising' : rsiDelta < -2 ? 'falling' : 'flat';
+
     // Divergence: compare last 10 candles
     const recent    = candles.slice(-10);
     const rsiValues = this.computeRSISeries(recent, 5);
 
-    const priceLL  = recent[recent.length - 1].low < Math.min(...recent.slice(0, -1).map(c => c.low));
-    const rsiHL    = rsiValues[rsiValues.length - 1] > Math.max(...rsiValues.slice(0, -1));
+    const priceLL = recent[recent.length - 1].low < Math.min(...recent.slice(0, -1).map(c => c.low));
+    const rsiHL   = rsiValues[rsiValues.length - 1] > Math.max(...rsiValues.slice(0, -1));
     const bullishDivergence = priceLL && rsiHL;
 
-    const priceHH  = recent[recent.length - 1].high > Math.max(...recent.slice(0, -1).map(c => c.high));
-    const rsiLH    = rsiValues[rsiValues.length - 1] < Math.min(...rsiValues.slice(0, -1));
+    const priceHH = recent[recent.length - 1].high > Math.max(...recent.slice(0, -1).map(c => c.high));
+    const rsiLH   = rsiValues[rsiValues.length - 1] < Math.min(...rsiValues.slice(0, -1));
     const bearishDivergence = priceHH && rsiLH;
 
-    return { rsi, rsiZone, bullishDivergence, bearishDivergence, atr };
-  }
-
-  private computeRSISeries(candles: Candle[], period: number): number[] {
-    return candles.map((_, i) => {
-      if (i < period) return 50;
-      return this.computeRSI(candles.slice(0, i + 1), period);
-    });
+    return { rsi, rsiZone, rsiTrend, bullishDivergence, bearishDivergence, atr };
   }
 
   // ─── ATR ──────────────────────────────────────────────────────────────────
@@ -214,47 +250,93 @@ export class FeatureEngineService {
     };
   }
 
-  // ─── Full Feature Set ─────────────────────────────────────────────────────
+  // ─── BOS / Swing Level Extraction ─────────────────────────────────────────
+
+  private extractBosDetails(structs: StructureEvent[], candles: Candle[]): {
+    lastBosDirection: 'bullish' | 'bearish' | null;
+    lastSwingHigh:    number | null;
+    lastSwingLow:     number | null;
+  } {
+    const bosEvents = structs.filter(s => s.type === 'BOS');
+    const lastBos   = bosEvents[bosEvents.length - 1] ?? null;
+
+    // Derive swing high/low from candle range near BOS
+    const swingHighs = candles.slice(-50).map(c => c.high);
+    const swingLows  = candles.slice(-50).map(c => c.low);
+
+    return {
+      lastBosDirection: lastBos ? (lastBos.bias === 'BULLISH' ? 'bullish' : 'bearish') : null,
+      lastSwingHigh:    swingHighs.length ? +Math.max(...swingHighs).toFixed(2) : null,
+      lastSwingLow:     swingLows.length  ? +Math.min(...swingLows).toFixed(2)  : null,
+    };
+  }
+
+  // ─── Full Feature Set (4-layer) ───────────────────────────────────────────
 
   compute(
-    htfCandles: Candle[],
-    ltfCandles: Candle[],
-    signal: SMCSignal | null,
-    symbol: string,
+    d1Candles:  Candle[],   // D1  — macro direction
+    h1Candles:  Candle[],   // H1  — structural confirmation (priority)
+    m15Candles: Candle[],   // M15 — setup confirmation
+    m5Candles:  Candle[],   // M5  — entry timing
+    signal:     SMCSignal | null,
+    symbol:     string,
   ): FeatureSet {
-    const ltfATR  = this.computeATR(ltfCandles);
-    const htfATR  = this.computeATR(htfCandles);
-    const price   = ltfCandles[ltfCandles.length - 1].close;
+    const d1ATR  = this.computeATR(d1Candles);
+    const h1ATR  = this.computeATR(h1Candles);
+    const m15ATR = this.computeATR(m15Candles);
+    const m5ATR  = this.computeATR(m5Candles);
 
-    const htfBias = this.smcService.getHTFBias(htfCandles);
-    const pd      = this.smcService.premiumDiscount(ltfCandles);
-    const ltfStructs = this.smcService.detectStructure(ltfCandles);
-    const hasBOS  = ltfStructs.some(s => s.type === 'BOS');
-    const hasCHoCH = ltfStructs.some(s => s.type === 'CHoCH');
-    const sweeps  = this.smcService.detectLiquiditySweeps(ltfCandles);
-    const liquiditySwept = sweeps.some(s => s.swept);
+    const price = m5Candles[m5Candles.length - 1].close;
+
+    // D1 macro bias
+    const htfBias = this.smcService.getHTFBias(d1Candles);
+
+    // H1 structural confirmation — BOS / CHoCH / swing levels
+    const h1Structs = this.smcService.detectStructure(h1Candles);
+    const hasBOS    = h1Structs.some(s => s.type === 'BOS');
+    const hasCHoCH  = h1Structs.some(s => s.type === 'CHoCH');
+    const bosDetails = this.extractBosDetails(h1Structs, h1Candles);
+
+    // M15 — OB / FVG zone identification
+    const m15Sweeps = this.smcService.detectLiquiditySweeps(m15Candles);
+    const liquiditySwept = m15Sweeps.some(s => s.swept);
+    const pd = this.smcService.premiumDiscount(m15Candles);
+
+    // Momentum computed on H1 (most signal-rich for gold)
+    const momentum = this.computeMomentum(h1Candles);
+
+    // Fibonacci from M15 swing range
+    const fibonacci = this.computeFibonacci(m15Candles);
 
     return {
       symbol,
       timestamp: new Date().toISOString(),
       price,
-      htfTrend:  this.computeTrend(htfCandles, htfATR),
-      ltfTrend:  this.computeTrend(ltfCandles, ltfATR),
-      momentum:  this.computeMomentum(ltfCandles),
-      fibonacci: this.computeFibonacci(ltfCandles),
+
+      d1Trend:  this.computeTrend(d1Candles,  d1ATR),
+      h1Trend:  this.computeTrend(h1Candles,  h1ATR),
+      m15Trend: this.computeTrend(m15Candles, m15ATR),
+      m5Trend:  this.computeTrend(m5Candles,  m5ATR),
+
+      momentum,
+      fibonacci,
+
       smc: {
-        bias:           htfBias,
-        bos:            hasBOS,
-        choch:          hasCHoCH,
-        obPresent:      !!signal?.ob,
-        obHigh:         signal?.ob?.high ?? null,
-        obLow:          signal?.ob?.low ?? null,
-        fvgPresent:     !!signal?.fvg,
-        fvgHigh:        signal?.fvg?.high ?? null,
-        fvgLow:         signal?.fvg?.low ?? null,
+        bias:             htfBias,
+        bos:              hasBOS,
+        choch:            hasCHoCH,
+        lastBosDirection: bosDetails.lastBosDirection,
+        lastSwingHigh:    bosDetails.lastSwingHigh,
+        lastSwingLow:     bosDetails.lastSwingLow,
+        obPresent:        !!signal?.ob,
+        obHigh:           signal?.ob?.high ?? null,
+        obLow:            signal?.ob?.low ?? null,
+        fvgPresent:       !!signal?.fvg,
+        fvgHigh:          signal?.fvg?.high ?? null,
+        fvgLow:           signal?.fvg?.low ?? null,
         liquiditySwept,
-        zone:           pd.zone,
-        zonePct:        pd.pct,
+        zone:             pd.zone,
+        zonePct:          pd.pct,
       },
     };
   }
