@@ -14,6 +14,8 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { FeatureSet } from './feature-engine.service';
 import { SMCSignal } from '../smc/smc.service';
+import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { sessionToUae } from '../common/symbol-registry';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,15 +40,37 @@ export interface AIRecommendation {
 export class AiReasoningService {
   private readonly logger = new Logger(AiReasoningService.name);
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config:       ConfigService,
+    private readonly activeSymbol: ActiveSymbolService,
+  ) {}
 
-  private get apiKey():    string { return this.config.get<string>('ANTHROPIC_API_KEY', ''); }
-  private get model():     string { return this.config.get<string>('CLAUDE_MODEL', 'claude-sonnet-4-6'); }
-  private get minConf():   number { return parseFloat(this.config.get<string>('AI_MIN_CONFIDENCE', '70')); }
+  private get apiKey():  string { return this.config.get<string>('ANTHROPIC_API_KEY', ''); }
+  private get model():   string { return this.config.get<string>('CLAUDE_MODEL', 'claude-sonnet-4-6'); }
+  private get minConf(): number { return parseFloat(this.config.get<string>('AI_MIN_CONFIDENCE', '70')); }
 
-  // ─── System prompt ────────────────────────────────────────────────────────
+  // ─── Dynamic system prompt — built per symbol on every call ──────────────
 
-  private readonly SYSTEM_PROMPT = `You are an elite institutional gold (XAUUSD) trader with 20+ years experience.
+  private get systemPrompt(): string {
+    const symCfg  = this.activeSymbol.getConfig();
+    const sym     = this.activeSymbol.getSymbol();
+    const label   = symCfg?.label       ?? sym;
+    const desc    = symCfg?.description ?? 'institutional price action';
+    const cat     = symCfg?.category    ?? 'forex';
+
+    // Build session killzone description from registry
+    const sessionLines = symCfg?.sessions
+      .map(s => `- ${s.name} (${s.startUtc}:00–${s.endUtc}:00 UTC = ${sessionToUae(s)})`)
+      .join('\n') ?? '- London (07–10 UTC)\n- New York (13–17 UTC)';
+
+    const expertise = cat === 'metals'      ? 'precious metals (gold/silver) SMC trader'
+                    : cat === 'indices'     ? 'US equity index SMC trader'
+                    : cat === 'commodities' ? 'energy commodities (oil) SMC trader'
+                    : cat === 'crypto'      ? 'cryptocurrency (Bitcoin) SMC trader'
+                    : 'institutional forex SMC trader';
+
+    return `You are an elite institutional ${expertise} with 20+ years experience.
+You are currently analysing ${label} (${sym}). ${desc}.
 You specialise in Smart Money Concepts (SMC) with a 5-layer top-down framework:
   D1  → Macro bias (weekly direction)
   H4  → Intermediate bias + Primary Order Blocks (INSTITUTIONAL MONEY LAYER)
@@ -55,9 +79,10 @@ You specialise in Smart Money Concepts (SMC) with a 5-layer top-down framework:
   M5  → Precise trigger (liquidity sweep + MSS)
 
 Key principles:
-- H4 Order Blocks are where institutional players position. Price touches H4 OBs 3-5× per week on gold.
+- H4 Order Blocks are where institutional players position.
 - Previous Day High/Low (PDH/PDL) are key intraday reference levels — respect rejections at these levels.
-- London (07–10 UTC) and New York (13–16 UTC) killzones produce 80% of daily gold moves.
+- Active trading sessions for ${sym}:
+${sessionLines}
 - Only trade WITH the D1 macro bias — never counter-trend.
 - Require H4 or H1 BOS/CHoCH before entry — no early entries.
 
@@ -67,12 +92,13 @@ Rules:
 3. Require BOS or CHoCH on H1 or H4 before entry.
 4. Never recommend a trade when confidence is below 70.
 5. Recommend WAIT if bias is NEUTRAL, no H4 OB in range, or killzone inactive.
-6. Always give specific numeric entry, SL, TP levels.
+6. Always give specific numeric entry, SL, TP levels appropriate for ${sym}.
 7. SL must sit below/above the H4 Order Block (not just M15) for institution-respected stops.
 8. Minimum 2:1 Risk:Reward. Prefer 3:1 on H4 OB setups.
 9. List at least 2 reasons AND at least 1 risk.
 
 Respond ONLY with valid JSON — no prose, no markdown, no text outside the JSON object.`;
+  }
 
   // ─── User prompt builder ──────────────────────────────────────────────────
 
@@ -174,7 +200,7 @@ Provide your recommendation in this EXACT JSON format:
         {
           model:      this.model,
           max_tokens: 1024,
-          system:     this.SYSTEM_PROMPT,
+          system:     this.systemPrompt,
           messages: [
             { role: 'user', content: prompt },
           ],

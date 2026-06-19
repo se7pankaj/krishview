@@ -8,42 +8,108 @@
 import { Controller, Get, Post, Param, Logger, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { JournalService } from '../journal/journal.service';
-import { Mt5Service, Position } from '../mt5/mt5.service';
+import { Mt5Service } from '../mt5/mt5.service';
 import { SmcService } from '../smc/smc.service';
 import { ConfigService } from '@nestjs/config';
 import { ApprovalService } from '../approval/approval.service';
 import { NewsService } from '../news/news.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { TradingService } from '../trading/trading.service';
+import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { SYMBOL_LIST } from '../common/symbol-registry';
+
+// ─── Simple TTL cache to avoid MetaApi 429 rate-limit errors ─────────────────
+class TtlCache {
+  private store = new Map<string, { value: any; expiresAt: number }>();
+  get<T>(key: string): T | undefined {
+    const entry = this.store.get(key);
+    if (!entry || Date.now() > entry.expiresAt) return undefined;
+    return entry.value as T;
+  }
+  set(key: string, value: any, ttlMs: number) {
+    this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+  }
+}
 
 @Controller('dashboard')
 export class DashboardController {
   private readonly logger = new Logger(DashboardController.name);
+  private readonly cache  = new TtlCache();
 
   constructor(
-    private readonly journal:   JournalService,
-    private readonly mt5:       Mt5Service,
-    private readonly smc:       SmcService,
-    private readonly config:    ConfigService,
-    private readonly approval:  ApprovalService,
-    private readonly news:      NewsService,
-    private readonly analysis:  AnalysisService,
-    private readonly trading:   TradingService,
+    private readonly journal:       JournalService,
+    private readonly mt5:           Mt5Service,
+    private readonly smc:           SmcService,
+    private readonly config:        ConfigService,
+    private readonly approval:      ApprovalService,
+    private readonly news:          NewsService,
+    private readonly analysis:      AnalysisService,
+    private readonly trading:       TradingService,
+    private readonly activeSymbol:  ActiveSymbolService,
   ) {}
+
+  /** Active config — tier, AI flag, test bypasses */
+  @Get('config')
+  getConfig() {
+    const tier = parseInt(this.config.get<string>('TRADING_TIER', '2'), 10);
+    const thresholds: Record<number, number> = { 1: 62, 2: 74, 3: 86 };
+    const testMode = ['SKIP_KILLZONE_CHECK', 'SKIP_EMA_HARD_BLOCK', 'SKIP_RSI_HARD_BLOCK',
+                      'SKIP_OB_FVG_GATE', 'SKIP_ZONE_CHECK']
+                     .some(k => this.config.get<string>(k, 'false') === 'true');
+
+    const symCfg = this.activeSymbol.getConfig();
+
+    const result = {
+      symbol:          this.activeSymbol.getSymbol(),
+      symbolLabel:     symCfg?.label       ?? this.activeSymbol.getSymbol(),
+      symbolEmoji:     symCfg?.emoji       ?? '📊',
+      symbolCategory:  symCfg?.category    ?? 'forex',
+      tradingTier:     tier,
+      tierThreshold:   thresholds[tier] ?? 74,
+      tierLabel:       tier === 1 ? 'Aggressive' : tier === 3 ? 'Sniper' : 'Balanced',
+      aiEnabled:       this.config.get<string>('AI_ENABLED', 'false') === 'true',
+      skipKillzone:    this.config.get<string>('SKIP_KILLZONE_CHECK', 'false') === 'true',
+      skipEmaBlock:    this.config.get<string>('SKIP_EMA_HARD_BLOCK', 'false') === 'true',
+      skipRsiBlock:    this.config.get<string>('SKIP_RSI_HARD_BLOCK', 'false') === 'true',
+      rsiOverbought:   parseFloat(this.config.get<string>('RSI_OVERBOUGHT', '75')),
+      rsiOversold:     parseFloat(this.config.get<string>('RSI_OVERSOLD', '25')),
+      spreadLimit:     symCfg?.spreadLimit ?? parseInt(this.config.get<string>('SPREAD_LIMIT', '200'), 10),
+      minRR:           parseFloat(this.config.get<string>('MIN_RR', '2')),
+      maxTrades:       parseInt(this.config.get<string>('MAX_TRADES', '3'), 10),
+      riskPct:         parseFloat(this.config.get<string>('RISK_PCT', '1')),
+      testMode,
+    };
+
+    if (testMode) {
+      const active = ['SKIP_KILLZONE_CHECK','SKIP_EMA_HARD_BLOCK','SKIP_RSI_HARD_BLOCK','SKIP_OB_FVG_GATE','SKIP_ZONE_CHECK']
+        .filter(k => this.config.get<string>(k, 'false') === 'true');
+      this.logger.warn(`⚠️  TEST MODE active — bypassed flags: ${active.join(', ')}`);
+    }
+
+    return result;
+  }
 
   /** Combined account + daily stats */
   @Get('summary')
   async summary() {
-    const symbol = this.config.get<string>('SYMBOL', 'XAUUSD');
     const defaultAccount = { balance: 0, equity: 0, login: 0, server: '' };
 
-    const [account, positions, stats] = await Promise.all([
-      this.mt5.getAccount().catch(() => defaultAccount) as Promise<typeof defaultAccount>,
-      this.mt5.getPositions(symbol).catch(() => [] as Position[]),
-      this.journal.getDailyStats(),
+    // NOTE: do NOT call getPositions() here — /positions endpoint handles that.
+    // Calling it in Promise.all causes double MetaApi hits per cycle → 429.
+    const [account, stats] = await Promise.all([
+      this.mt5.getAccount().catch((e: Error) => {
+        this.logger.error(`summary: getAccount() failed — ${e.message}`);
+        return defaultAccount;
+      }) as Promise<typeof defaultAccount>,
+      this.journal.getDailyStats().catch((e: Error) => {
+        this.logger.error(`summary: getDailyStats() failed — ${e.message}`);
+        return { totalPnL: 0, total: 0, wins: 0, losses: 0, winRate: 0 };
+      }),
     ]);
 
-    const floatPnL = (positions as Position[]).reduce((s, p) => s + (p.profit || 0), 0);
+    if (!account.login) {
+      this.logger.warn('summary: account.login is 0 — MetaApi may be disconnected');
+    }
 
     return {
       login:       account.login,
@@ -55,23 +121,21 @@ export class DashboardController {
       wins:        stats.wins,
       losses:      stats.losses,
       winRate:     stats.winRate,
-      openCount:   positions.length,
-      floatingPnL: +floatPnL.toFixed(2),
+      openCount:   0,   // populated by /positions endpoint on the frontend
+      floatingPnL: 0,   // populated by /positions endpoint on the frontend
     };
   }
 
-  /** Open positions from MT5 */
+  /** Open positions from MT5 — always live */
   @Get('positions')
   async positions() {
-    const symbol = this.config.get<string>('SYMBOL', 'XAUUSD');
-    return this.mt5.getPositions(symbol).catch(() => []);
+    return this.mt5.getPositions(this.activeSymbol.getSymbol()).catch(() => []);
   }
 
-  /** Live bid/ask price */
+  /** Live bid/ask price — always live */
   @Get('price')
   async price() {
-    const symbol = this.config.get<string>('SYMBOL', 'XAUUSD');
-    return this.mt5.getPrice(symbol).catch(() => null);
+    return this.mt5.getPrice(this.activeSymbol.getSymbol()).catch(() => null);
   }
 
   /** All trades from journal */
@@ -89,7 +153,10 @@ export class DashboardController {
   /** Live SMC state — 5-layer: D1 → H4 → H1 → M15 → M5 */
   @Get('smc')
   async smcState() {
-    const symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
+    const symbol = this.activeSymbol.getSymbol();
+    const cacheKey = `smc:${symbol}`;
+    const cached = this.cache.get<any>(cacheKey);
+    if (cached) return cached;
     const htfTf     = this.config.get<string>('HTF_TF',     'D1');
     const h4Tf      = this.config.get<string>('H4_TF',      'H4');
     const confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
@@ -97,13 +164,12 @@ export class DashboardController {
     const entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
 
     try {
-      const [d1, h4, h1, m15, m5] = await Promise.all([
-        this.mt5.getCandles(htfTf,     200, symbol),
-        this.mt5.getCandles(h4Tf,      200, symbol),
-        this.mt5.getCandles(confirmTf, 200, symbol),
-        this.mt5.getCandles(setupTf,   200, symbol),
-        this.mt5.getCandles(entryTf,   200, symbol),
-      ]);
+      // historyClient is a separate MetaApi hostname — no 429 risk, no delays needed
+      const d1  = await this.mt5.getCandles(htfTf,     200, symbol);
+      const h4  = await this.mt5.getCandles(h4Tf,      200, symbol);
+      const h1  = await this.mt5.getCandles(confirmTf, 200, symbol);
+      const m15 = await this.mt5.getCandles(setupTf,   200, symbol);
+      const m5  = await this.mt5.getCandles(entryTf,   200, symbol);
 
       const bias   = this.smc.getHTFBias(d1);
       const obs    = this.smc.detectOrderBlocks(m15);
@@ -115,7 +181,7 @@ export class DashboardController {
       const h1Structs = this.smc.detectStructure(h1);
       const signal = this.smc.analyze(d1, h4, h1, m15, m5);
 
-      return {
+      const result = {
         bias,
         h4Zone:     h4Pd.zone,
         h4ZonePct:  h4Pd.pct,
@@ -130,7 +196,18 @@ export class DashboardController {
         confidence: signal?.confidence ?? 0,
         direction:  signal?.direction ?? null,
       };
+
+      this.logger.log(
+        `SMC state: bias=${bias} zone=${pd.zone} h4Zone=${h4Pd.zone} ` +
+        `h4OBs=${h4Obs.length} m15OBs=${obs.length} FVGs=${fvgs.length} ` +
+        `h1BOS=${result.h1Bos} h1CHoCH=${result.h1Choch} ` +
+        `sweeps=${result.sweepCount} dir=${result.direction ?? 'none'} conf=${result.confidence}%`,
+      );
+
+      this.cache.set(cacheKey, result, 60_000); // SMC candles don't change every second — cache 60s
+      return result;
     } catch (e: any) {
+      this.logger.error(`SMC state error: ${e.message}`, e.stack);
       return { bias: 'NEUTRAL', error: e.message };
     }
   }
@@ -176,7 +253,7 @@ export class DashboardController {
    */
   @Get('debug')
   async debugCycle() {
-    const symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
+    const symbol    = this.activeSymbol.getSymbol();
     const htfTf     = this.config.get<string>('HTF_TF',     'D1');
     const h4Tf      = this.config.get<string>('H4_TF',      'H4');
     const confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
@@ -199,13 +276,11 @@ export class DashboardController {
     // ── Gate 1: Candles ──────────────────────────────────────────────────────
     let d1: any[] = [], h4: any[] = [], h1: any[] = [], m15: any[] = [], m5: any[] = [];
     try {
-      [d1, h4, h1, m15, m5] = await Promise.all([
-        this.mt5.getCandles(htfTf,     200, symbol),
-        this.mt5.getCandles(h4Tf,      200, symbol),
-        this.mt5.getCandles(confirmTf, 200, symbol),
-        this.mt5.getCandles(setupTf,   200, symbol),
-        this.mt5.getCandles(entryTf,   200, symbol),
-      ]);
+      d1  = await this.mt5.getCandles(htfTf,     200, symbol);
+      h4  = await this.mt5.getCandles(h4Tf,      200, symbol);
+      h1  = await this.mt5.getCandles(confirmTf, 200, symbol);
+      m15 = await this.mt5.getCandles(setupTf,   200, symbol);
+      m5  = await this.mt5.getCandles(entryTf,   200, symbol);
       report.candles = { d1: d1.length, h4: h4.length, h1: h1.length, m15: m15.length, m5: m5.length, ok: true };
     } catch (e: any) {
       return { ...report, blockedAt: 'CANDLES', error: e.message };
@@ -277,11 +352,9 @@ export class DashboardController {
 
     // ── Gate 3: Risk ─────────────────────────────────────────────────────────
     try {
-      const [account, tick, positions] = await Promise.all([
-        this.mt5.getAccount(),
-        this.mt5.getPrice(symbol),
-        this.mt5.getPositions(symbol),
-      ]);
+      const account   = await this.mt5.getAccount();
+      const tick      = await this.mt5.getPrice(symbol);
+      const positions = await this.mt5.getPositions(symbol);
 
       const nowUtc = new Date().getUTCHours();
       const sessionOk = this.config.get<string>('SKIP_SESSION_FILTER', 'false') === 'true'
@@ -348,7 +421,8 @@ export class DashboardController {
       // executeSMCCycle() creates the Approval record and waits for human decision.
       // We fire it without awaiting so the HTTP response returns immediately;
       // the approval appears in /dashboard/approvals on the next poll.
-      this.trading.executeSMCCycle().catch(e =>
+      // forceRun=true bypasses the killzone gate so manual triggers always run analysis
+      this.trading.executeSMCCycle(undefined, true).catch(e =>
         this.logger.error(`Manual trigger cycle error: ${e.message}`),
       );
       return { ok: true, message: 'Cycle started — check Pending Approvals in ~5 seconds', timestamp: new Date().toISOString() };
@@ -431,5 +505,90 @@ export class DashboardController {
     if (!result) return { ok: false, error: `Approval #${id} not found or already resolved` };
     this.logger.log(`Dashboard rejected trade approval #${id}`);
     return { ok: true, status: result.status };
+  }
+
+  // ─── Symbol Management ────────────────────────────────────────────────────
+
+  /**
+   * GET /dashboard/symbols — full list of tradeable symbols from SymbolRegistry.
+   * Used by the dropdown to populate options.
+   */
+  @Get('symbols')
+  getSymbols() {
+    return SYMBOL_LIST.map(cfg => ({
+      symbol:   cfg.symbol,
+      label:    cfg.label,
+      emoji:    cfg.emoji,
+      category: cfg.category,
+      sessions: cfg.sessions.map(s => ({
+        name:     s.name,
+        startUtc: s.startUtc,
+        endUtc:   s.endUtc,
+        startUae: (s.startUtc + 4) % 24,
+        endUae:   (s.endUtc   + 4) % 24,
+      })),
+      spreadLimit: cfg.spreadLimit,
+      description: cfg.description,
+    }));
+  }
+
+  /**
+   * GET /dashboard/active-symbol — current symbol + its full config.
+   * Dashboard polls this on load to know which symbol is selected.
+   */
+  @Get('active-symbol')
+  getActiveSymbol() {
+    const sym    = this.activeSymbol.getSymbol();
+    const cfg    = this.activeSymbol.getConfig();
+    const utcH   = new Date().getUTCHours();
+    const inSession = cfg?.sessions.some(s => {
+      if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
+      return utcH >= s.startUtc && utcH < s.endUtc;
+    }) ?? false;
+
+    const activeSessions = cfg?.sessions
+      .filter(s => {
+        if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
+        return utcH >= s.startUtc && utcH < s.endUtc;
+      })
+      .map(s => s.name) ?? [];
+
+    return {
+      symbol:          sym,
+      label:           cfg?.label       ?? sym,
+      emoji:           cfg?.emoji       ?? '📊',
+      category:        cfg?.category    ?? 'forex',
+      description:     cfg?.description ?? '',
+      sessions:        cfg?.sessions    ?? [],
+      spreadLimit:     cfg?.spreadLimit ?? 0,
+      pipSize:         cfg?.pipSize     ?? 0.0001,
+      pipValuePerLot:  cfg?.pipValuePerLot ?? 10,
+      inSession,
+      activeSessions,
+      utcHour:         utcH,
+      uaeHour:         (utcH + 4) % 24,
+    };
+  }
+
+  /**
+   * POST /dashboard/set-symbol/:symbol — switch active trading symbol.
+   * Takes effect on the NEXT analysis cycle (within 5 minutes).
+   */
+  @Post('set-symbol/:symbol')
+  setSymbol(@Param('symbol') symbol: string) {
+    const result = this.activeSymbol.setSymbol(symbol);
+    if (!result.ok) {
+      this.logger.warn(`Dashboard: invalid symbol "${symbol}" — ${result.error}`);
+      return { ok: false, error: result.error };
+    }
+    this.logger.log(`Dashboard: symbol switched → ${symbol} (${result.config?.label})`);
+    return {
+      ok:          true,
+      symbol,
+      label:       result.config?.label,
+      emoji:       result.config?.emoji,
+      sessions:    result.config?.sessions,
+      spreadLimit: result.config?.spreadLimit,
+    };
   }
 }

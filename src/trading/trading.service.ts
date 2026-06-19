@@ -17,20 +17,21 @@ import { ApprovalService } from '../approval/approval.service';
 import { MlService } from '../ml/ml.service';
 import { ConfidenceExplainerService } from '../analysis/confidence-explainer.service';
 import { NewsService } from '../news/news.service';
+import { ActiveSymbolService } from './active-symbol.service';
+import { getActiveSession } from '../common/symbol-registry';
 
 @Injectable()
 export class TradingService implements OnApplicationBootstrap {
   private readonly logger = new Logger(TradingService.name);
-  private readonly symbol: string;
-  private readonly htfTf: string;
-  private readonly h4Tf: string;
+
+  // ── Dynamic getter — reads from SymbolModule at call time, never cached ──
+  private get symbol(): string { return this.activeSymbol.getSymbol(); }
+
+  private readonly htfTf:     string;
+  private readonly h4Tf:      string;
   private readonly confirmTf: string;
-  private readonly setupTf: string;
-  private readonly entryTf: string;
-  private readonly killzoneLondonStart: number;
-  private readonly killzoneLondonEnd: number;
-  private readonly killzoneNyStart: number;
-  private readonly killzoneNyEnd: number;
+  private readonly setupTf:   string;
+  private readonly entryTf:   string;
   private readonly skipKillzoneCheck: boolean;
   private lastDailyReport = -1;
 
@@ -39,37 +40,39 @@ export class TradingService implements OnApplicationBootstrap {
   private readonly MAX_RECONCILE_RETRIES = 20; // ~10 minutes at 30s intervals
 
   constructor(
-    private readonly config:    ConfigService,
-    private readonly smc:       SmcService,
-    private readonly risk:      RiskService,
-    private readonly mt5:       Mt5Service,
-    private readonly journal:   JournalService,
-    private readonly telegram:  TelegramService,
-    private readonly analysis:  AnalysisService,
-    private readonly approval:  ApprovalService,
-    private readonly ml:        MlService,
-    private readonly explainer: ConfidenceExplainerService,
-    private readonly news:      NewsService,
+    private readonly config:       ConfigService,
+    private readonly smc:          SmcService,
+    private readonly risk:         RiskService,
+    private readonly mt5:          Mt5Service,
+    private readonly journal:      JournalService,
+    private readonly telegram:     TelegramService,
+    private readonly analysis:     AnalysisService,
+    private readonly approval:     ApprovalService,
+    private readonly ml:           MlService,
+    private readonly explainer:    ConfidenceExplainerService,
+    private readonly news:         NewsService,
+    private readonly activeSymbol: ActiveSymbolService,
   ) {
-    this.symbol    = this.config.get<string>('SYMBOL',     'XAUUSD');
     this.htfTf     = this.config.get<string>('HTF_TF',     'D1');
     this.h4Tf      = this.config.get<string>('H4_TF',      'H4');
     this.confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
     this.setupTf   = this.config.get<string>('SETUP_TF',   'M15');
     this.entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
-    this.killzoneLondonStart = parseInt(this.config.get('KILLZONE_LONDON_START', '7'),  10);
-    this.killzoneLondonEnd   = parseInt(this.config.get('KILLZONE_LONDON_END',   '10'), 10);
-    this.killzoneNyStart     = parseInt(this.config.get('KILLZONE_NY_START',     '13'), 10);
-    this.killzoneNyEnd       = parseInt(this.config.get('KILLZONE_NY_END',       '16'), 10);
-    this.skipKillzoneCheck   = this.config.get<string>('SKIP_KILLZONE_CHECK', 'false') === 'true';
+    this.skipKillzoneCheck = this.config.get<string>('SKIP_KILLZONE_CHECK', 'false') === 'true';
   }
 
-  /** Returns true if now is inside London or NY killzone (UTC hours). */
+  /**
+   * Returns true if now is inside any active session for the current symbol.
+   * Sessions are read from SymbolRegistry — switching the symbol automatically
+   * changes which hours count as a killzone, no env vars needed.
+   */
   private inKillzone(): { active: boolean; name: string } {
-    const h = new Date().getUTCHours();
-    if (h >= this.killzoneLondonStart && h < this.killzoneLondonEnd) return { active: true, name: 'London' };
-    if (h >= this.killzoneNyStart     && h < this.killzoneNyEnd)     return { active: true, name: 'New York' };
-    return { active: false, name: 'None' };
+    const h       = new Date().getUTCHours();
+    const sym     = this.activeSymbol.getSymbol();
+    const session = getActiveSession(sym, h);
+    return session
+      ? { active: true,  name: session }
+      : { active: false, name: 'None'  };
   }
 
   async onApplicationBootstrap(): Promise<void> {
@@ -103,16 +106,19 @@ export class TradingService implements OnApplicationBootstrap {
     );
 
     // Sync any MT5 positions not yet in the journal (catches manually-opened trades)
-    this.syncMt5Positions().catch(e =>
-      this.logger.error(`Position sync error: ${e.message}`),
-    );
+    // Delay 15s on startup so it doesn't clash with the dashboard's initial polling burst
+    setTimeout(() => {
+      this.syncMt5Positions().catch(e =>
+        this.logger.error(`Position sync error: ${e.message}`),
+      );
+    }, 15_000);
 
-    // Open-trade monitor every 30 s
+    // Open-trade monitor every 60 s (was 30 s — halved to avoid MetaApi 429 collisions)
     setInterval(() => {
       this.syncMt5Positions()
         .then(() => this.monitorOpenTrades())
         .catch(e => this.logger.error(`Monitor error: ${e.message}`));
-    }, 30_000);
+    }, 60_000);
 
     // Daily report check every minute
     setInterval(() => {
@@ -145,29 +151,43 @@ export class TradingService implements OnApplicationBootstrap {
    *   5. Wait for APPROVED / REJECTED / EXPIRED
    *   6. Execute trade if approved
    */
-  async executeSMCCycle(hintDirection?: 'BUY' | 'SELL'): Promise<void> {
+  /**
+   * @param hintDirection  Optional direction hint from webhook (BUY/SELL).
+   * @param forceRun       When true (manual dashboard trigger) the killzone gate
+   *                       is skipped so analysis always runs on demand. Trade
+   *                       execution still proceeds normally — the human approving
+   *                       the trade is the final gate off-hours.
+   */
+  async executeSMCCycle(hintDirection?: 'BUY' | 'SELL', forceRun = false): Promise<void> {
     this.logger.log(`════ SMC Cycle START — ${this.symbol} ════`);
 
-    // Killzone gate — only trade during London (07–10 UTC) or NY (13–16 UTC) sessions
+    // Killzone gate — only skip when automated timer fires outside session.
+    // forceRun=true (manual trigger) bypasses this so the dashboard always works.
     const kz = this.inKillzone();
-    if (!kz.active && !this.skipKillzoneCheck) {
+    if (!kz.active && !this.skipKillzoneCheck && !forceRun) {
       this.logger.log(`SMC Cycle SKIPPED — outside killzone (UTC hour: ${new Date().getUTCHours()}). Next: London 07:00 or NY 13:00`);
       return;
     }
     if (kz.active) {
       this.logger.log(`✅ Killzone active: ${kz.name} session`);
+    } else if (forceRun) {
+      this.logger.log(`⚠️ Off-hours — killzone gate bypassed by manual trigger`);
     } else {
       this.logger.log(`⚠️ Killzone check bypassed (SKIP_KILLZONE_CHECK=true) — running outside session`);
     }
 
     // 1. Candles — 5-layer top-down: D1 → H4 → H1 → M15 → M5
-    const [htfCandles, h4Candles, confirmCandles, setupCandles, entryCandles] = await Promise.all([
-      this.mt5.getCandles(this.htfTf,     200, this.symbol),
-      this.mt5.getCandles(this.h4Tf,      200, this.symbol),
-      this.mt5.getCandles(this.confirmTf, 200, this.symbol),
-      this.mt5.getCandles(this.setupTf,   200, this.symbol),
-      this.mt5.getCandles(this.entryTf,   200, this.symbol),
-    ]);
+    // Sequential with 600ms gaps to avoid 5 simultaneous MetaApi historyClient calls → 429
+    const tfDelay = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const htfCandles     = await this.mt5.getCandles(this.htfTf,     200, this.symbol);
+    await tfDelay(300);
+    const h4Candles      = await this.mt5.getCandles(this.h4Tf,      200, this.symbol);
+    await tfDelay(300);
+    const confirmCandles = await this.mt5.getCandles(this.confirmTf, 200, this.symbol);
+    await tfDelay(300);
+    const setupCandles   = await this.mt5.getCandles(this.setupTf,   200, this.symbol);
+    await tfDelay(300);
+    const entryCandles   = await this.mt5.getCandles(this.entryTf,   200, this.symbol);
 
     this.logger.log(
       `[1/6] Candles: D1=${htfCandles?.length ?? 0} H4=${h4Candles?.length ?? 0} ` +
@@ -241,13 +261,11 @@ export class TradingService implements OnApplicationBootstrap {
       return;
     }
 
-    // 3. Risk check
+    // 3. Risk check — sequential to avoid concurrent MetaApi calls → 429
     this.logger.log('[4/6] Running risk checks…');
-    const [account, tick, openPositions] = await Promise.all([
-      this.mt5.getAccount(),
-      this.mt5.getPrice(this.symbol),
-      this.mt5.getPositions(this.symbol),
-    ]);
+    const account       = await this.mt5.getAccount();
+    const tick          = await this.mt5.getPrice(this.symbol);
+    const openPositions = await this.mt5.getPositions(this.symbol);
 
     this.logger.log(`[4/6] Account: balance=${account.balance} equity=${account.equity} | spread=${tick.spread} | openPositions=${openPositions.length}`);
 
@@ -442,6 +460,9 @@ export class TradingService implements OnApplicationBootstrap {
     const openBroker  = await this.mt5.getPositions(this.symbol);
     const brokerMap   = new Map(openBroker.map(p => [p.ticket, p]));
 
+    // Fetch price ONCE for the whole loop — avoids N calls per N open trades every 60s
+    const sharedTick = await this.mt5.getPrice(this.symbol).catch(() => null);
+
     for (const trade of openJournal) {
       const brokerPos = brokerMap.get(trade.ticket);
 
@@ -482,7 +503,7 @@ export class TradingService implements OnApplicationBootstrap {
       const openTime = trade.openTime ? new Date(trade.openTime) : null;
       if (openTime && (Date.now() - openTime.getTime()) > maxHoldHours * 3_600_000) {
         try {
-          const tick = await this.mt5.getPrice(this.symbol);
+          const tick = sharedTick ?? await this.mt5.getPrice(this.symbol);
           const exitPrice = trade.direction === 'BUY' ? tick.bid : tick.ask;
           await this.mt5.closePosition(trade.ticket);
           const pnl = (trade.direction === 'BUY'
@@ -503,7 +524,7 @@ export class TradingService implements OnApplicationBootstrap {
       }
 
       // ── Active SL Management for open positions (Sprint 3.2) ─────────────
-      await this.manageOpenPosition(trade, brokerPos);
+      await this.manageOpenPosition(trade, brokerPos, sharedTick);
     }
   }
 
@@ -514,8 +535,10 @@ export class TradingService implements OnApplicationBootstrap {
   private async manageOpenPosition(
     trade: any,
     brokerPos: any,
+    sharedTick?: { bid: number; ask: number } | null,
   ): Promise<void> {
-    const tick    = await this.mt5.getPrice(this.symbol);
+    // Reuse shared tick fetched once per monitor cycle — avoids N getPrice() calls per N trades
+    const tick    = sharedTick ?? await this.mt5.getPrice(this.symbol);
     const price   = trade.direction === 'BUY' ? tick.bid : tick.ask;
     const atr     = Number(trade.lastAtr) || 5; // fallback 5 pts if not stored
     const entry   = Number(trade.entryPrice);

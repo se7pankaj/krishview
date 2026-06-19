@@ -84,14 +84,15 @@ export interface ClosedDeal {
 // ─── Timeframe mapping: env values → MetaApi format ───────────────────────────
 
 const TF_MAP: Record<string, string> = {
-  D1: '1D', H4: '4H', H1: '1H', H2: '2H',
-  M30: '30M', M15: '15M', M5: '5M', M1: '1M',
+  D1: '1d', H4: '4h', H1: '1h', H2: '2h',
+  M30: '30m', M15: '15m', M5: '5m', M1: '1m',
 };
 
 @Injectable()
 export class Mt5Service {
   private readonly logger = new Logger(Mt5Service.name);
-  private readonly client: AxiosInstance;
+  private readonly client:         AxiosInstance;
+  private readonly historyClient:  AxiosInstance;  // historical candles use different hostname
   private readonly symbol: string;
   private readonly accountId: string;
 
@@ -102,13 +103,22 @@ export class Mt5Service {
     this.symbol     = this.config.get<string>('SYMBOL', 'XAUUSD');
     this.accountId  = accountId;
 
+    const headers = {
+      'auth-token':   token,
+      'Content-Type': 'application/json',
+    };
+
     this.client = axios.create({
       baseURL: `https://mt-client-api-v1.${region}.agiliumtrade.ai`,
       timeout: 30_000,
-      headers: {
-        'auth-token':   token,
-        'Content-Type': 'application/json',
-      },
+      headers,
+    });
+
+    // Historical market data is hosted on a separate subdomain per MetaApi docs
+    this.historyClient = axios.create({
+      baseURL: `https://mt-market-data-client-api-v1.${region}.agiliumtrade.ai`,
+      timeout: 60_000,  // candle requests can take longer
+      headers,
     });
 
     this.logger.log(`MetaApi configured: accountId=${accountId} region=${region}`);
@@ -176,7 +186,7 @@ export class Mt5Service {
     const sym = symbol ?? this.symbol;
     const tf  = this.toMetaTf(timeframe);
 
-    const r = await this.client.get(
+    const r = await this.historyClient.get(
       `${this.acctPath}/historical-market-data/symbols/${sym}/timeframes/${tf}/candles`,
       { params: { limit: count } },
     );
