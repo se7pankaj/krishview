@@ -28,6 +28,39 @@ export class JournalService {
     private readonly repo: Repository<Trade>,
   ) {}
 
+  /** Import a position that was opened outside the bot (e.g. manually in MT5) */
+  async logManualEntry(params: {
+    ticket:    number;
+    symbol:    string;
+    direction: 'BUY' | 'SELL';
+    lots:      number;
+    entryPrice: number;
+    sl:        number;
+    tp:        number;
+  }): Promise<Trade> {
+    const trade = this.repo.create({
+      ticket:      params.ticket,
+      symbol:      params.symbol,
+      direction:   params.direction,
+      lots:        params.lots,
+      entryPrice:  params.entryPrice,
+      sl:          params.sl,
+      tp:          params.tp,
+      currentSl:   params.sl,
+      rrPlanned:   0,
+      confidence:  0,
+      smcReasons:  ['manual'],
+      status:      'OPEN',
+      openTime:    new Date(),
+      session:     this.currentSession(),
+      trailCount:  0,
+      partialTpHit: false,
+    });
+    const saved = await this.repo.save(trade);
+    this.logger.log(`Journal: Manual import #${saved.ticket} ${saved.direction} @ ${saved.entryPrice}`);
+    return saved;
+  }
+
   /** Record a new entry (trade placed) */
   async logEntry(params: {
     ticket:     number;
@@ -110,9 +143,66 @@ export class JournalService {
     if (trade) await this.repo.update(trade.id, { partialTpHit: true });
   }
 
+  /** Import a closed deal from MT5 history that isn't already in the journal.
+   *  If a record exists with pnl=0 (bad data from a failed deal lookup), overwrite it. */
+  async importClosedDeal(params: {
+    ticket:     number;
+    symbol:     string;
+    direction:  'BUY' | 'SELL';
+    lots:       number;
+    entryPrice: number;
+    exitPrice:  number;
+    pnl:        number;
+    exitTime:   string;
+  }): Promise<void> {
+    const existing = await this.repo.findOne({ where: { ticket: params.ticket } });
+    // Skip if already recorded with real PnL data
+    if (existing && (existing.pnl !== 0 || existing.exitPrice !== 0)) return;
+    // If exists with zero PnL (bad data), delete and re-import
+    if (existing) await this.repo.delete(existing.id);
+
+    const trade = this.repo.create({
+      ticket:      params.ticket,
+      symbol:      params.symbol,
+      direction:   params.direction,
+      lots:        params.lots,
+      entryPrice:  params.entryPrice || params.exitPrice,
+      exitPrice:   params.exitPrice,
+      sl:          0,
+      tp:          0,
+      currentSl:   0,
+      rrPlanned:   0,
+      rrActual:    0,
+      confidence:  0,
+      smcReasons:  ['imported'],
+      pnl:         params.pnl,
+      status:      'CLOSED',
+      openTime:    new Date(params.exitTime),
+      closeTime:   new Date(params.exitTime),
+      closeReason: 'IMPORTED',
+      trailCount:  0,
+      partialTpHit: false,
+    });
+    await this.repo.save(trade);
+  }
+
+  /** Check if a ticket is already in the journal (any status) */
+  async hasTicket(ticket: number): Promise<boolean> {
+    const count = await this.repo.count({ where: { ticket } });
+    return count > 0;
+  }
+
   /** Get all open trades */
   async getOpenTrades(): Promise<Trade[]> {
     return this.repo.find({ where: { status: 'OPEN' }, order: { openTime: 'ASC' } });
+  }
+
+  /** Get CLOSED trades that have exitPrice=0 — need PnL reconciliation */
+  async getClosedWithZeroExit(): Promise<Trade[]> {
+    return this.repo.find({
+      where: { status: 'CLOSED', exitPrice: 0 },
+      order: { closeTime: 'DESC' },
+    });
   }
 
   /** Get all trades, newest first */
@@ -153,12 +243,14 @@ export class JournalService {
 
   /** All-time performance stats */
   async getAllTimeStats(): Promise<{
+    total: number;
     totalTrades: number;
     wins: number;
     losses: number;
     winRate: number;
     avgRR: number;
     totalPnL: number;
+    profitFactor: number | null;
   }> {
     const all = await this.repo.find({ where: { status: 'CLOSED' } });
     const wins    = all.filter(t => (Number(t.pnl) || 0) > 0).length;
@@ -168,10 +260,23 @@ export class JournalService {
       ? +(all.reduce((s, t) => s + (Number(t.rrActual) || 0), 0) / all.length).toFixed(2)
       : 0;
 
+    const grossProfit = all.reduce((s, t) => {
+      const p = Number(t.pnl) || 0;
+      return s + (p > 0 ? p : 0);
+    }, 0);
+    const grossLoss = Math.abs(all.reduce((s, t) => {
+      const p = Number(t.pnl) || 0;
+      return s + (p < 0 ? p : 0);
+    }, 0));
+    const profitFactor = grossLoss > 0 ? +(grossProfit / grossLoss).toFixed(2) : null;
+
     return {
-      totalTrades: all.length, wins, losses,
+      total: all.length,
+      totalTrades: all.length,
+      wins, losses,
       winRate: all.length > 0 ? +(wins / all.length * 100).toFixed(1) : 0,
       avgRR, totalPnL: +totalPnL.toFixed(2),
+      profitFactor,
     };
   }
 

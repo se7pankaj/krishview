@@ -12,9 +12,8 @@ import { JournalService } from '../journal/journal.service';
 import { NewsService } from '../news/news.service';
 import { SMCSignal } from '../smc/smc.service';
 import { TelegramService } from '../telegram.service';
-
-// XAUUSD: 1 standard lot = 100 oz → $10/pip × 10 pts per price unit
-const XAUUSD_PIP_VALUE_PER_LOT = 10;
+import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { getActiveSession } from '../common/symbol-registry';
 
 export interface RiskCheckResult {
   ok: boolean;
@@ -38,27 +37,42 @@ export class RiskService {
   private suspendedUntil: Date | null = null;
 
   constructor(
-    private readonly config:   ConfigService,
-    private readonly journal:  JournalService,
-    private readonly news:     NewsService,
-    private readonly telegram: TelegramService,
+    private readonly config:        ConfigService,
+    private readonly journal:       JournalService,
+    private readonly news:          NewsService,
+    private readonly telegram:      TelegramService,
+    private readonly activeSymbol:  ActiveSymbolService,
   ) {}
 
-  private get riskPct():           number { return parseFloat(this.config.get('RISK_PCT', '1')); }
-  private get maxDailyLoss():      number { return parseFloat(this.config.get('MAX_DAILY_LOSS_PCT', '3')); }
-  private get maxTrades():         number { return parseInt(this.config.get('MAX_TRADES', '3'), 10); }
-  private get minRR():             number { return parseFloat(this.config.get('MIN_RR', '2')); }
-  private get spreadLimit():       number { return parseInt(this.config.get('SPREAD_LIMIT', '30'), 10); }
-  private get confidenceMin():     number { return parseFloat(this.config.get('CONFIDENCE_THRESHOLD', '60')); }
-  private get londonStart():       number { return parseInt(this.config.get('LONDON_START', '7'), 10); }
-  private get londonEnd():         number { return parseInt(this.config.get('LONDON_END', '16'), 10); }
-  private get nyStart():           number { return parseInt(this.config.get('NY_START', '12'), 10); }
-  private get nyEnd():             number { return parseInt(this.config.get('NY_END', '21'), 10); }
-  private get maxConsecLosses():   number { return parseInt(this.config.get('MAX_CONSEC_LOSSES', '3'), 10); }
-  private get consecPausHours():   number { return parseInt(this.config.get('CONSEC_PAUSE_HOURS', '24'), 10); }
+  private get riskPct():         number { return parseFloat(this.config.get('RISK_PCT', '1')); }
+  private get maxDailyLoss():    number { return parseFloat(this.config.get('MAX_DAILY_LOSS_PCT', '3')); }
+  private get maxTrades():       number { return parseInt(this.config.get('MAX_TRADES', '3'), 10); }
+  private get minRR():           number { return parseFloat(this.config.get('MIN_RR', '2')); }
+  private get confidenceMin():   number { return parseFloat(this.config.get('CONFIDENCE_THRESHOLD', '60')); }
+  private get maxConsecLosses(): number { return parseInt(this.config.get('MAX_CONSEC_LOSSES', '3'), 10); }
+  private get consecPausHours(): number { return parseInt(this.config.get('CONSEC_PAUSE_HOURS', '24'), 10); }
 
-  /** Is the current UTC time within London or NY session? */
+  /** Spread limit from SymbolRegistry; env SPREAD_LIMIT is the global fallback */
+  private get spreadLimit(): number {
+    return this.activeSymbol.getConfig()?.spreadLimit
+      ?? parseInt(this.config.get('SPREAD_LIMIT', '200'), 10);
+  }
+
+  /** Set SKIP_SESSION_FILTER=true in .env to allow trading at any hour (testing only) */
+  private get skipSessionFilter(): boolean {
+    return this.config.get<string>('SKIP_SESSION_FILTER', 'false') === 'true';
+  }
+
+  /**
+   * Is the current UTC time within any active session for the selected symbol?
+   * Sessions are read from SymbolRegistry — no hardcoded London/NY hours.
+   */
   isAllowedSession(): boolean {
+    if (this.skipSessionFilter) {
+      this.logger.warn('Risk: SKIP_SESSION_FILTER=true — session check bypassed (testing mode)');
+      return true;
+    }
+
     const now  = new Date();
     const gmtH = now.getUTCHours();
     const day  = now.getUTCDay(); // 0=Sun, 6=Sat
@@ -68,31 +82,43 @@ export class RiskService {
       return false;
     }
 
-    const inLondon = gmtH >= this.londonStart && gmtH < this.londonEnd;
-    const inNY     = gmtH >= this.nyStart      && gmtH < this.nyEnd;
+    const sym     = this.activeSymbol.getSymbol();
+    const session = getActiveSession(sym, gmtH);
 
-    if (!inLondon && !inNY) {
-      this.logger.log(`Risk: Outside trading sessions (GMT ${gmtH}:xx)`);
+    if (!session) {
+      const symCfg  = this.activeSymbol.getConfig();
+      const windows = symCfg?.sessions.map(s => `${s.name} ${s.startUtc}–${s.endUtc} UTC`).join(', ') ?? 'none';
+      this.logger.log(`Risk: Outside ${sym} sessions (GMT ${gmtH}:xx) — valid windows: ${windows}`);
       return false;
     }
+
     return true;
   }
 
   /**
    * Calculate lot size using fixed fractional method.
+   * Uses pipSize + pipValuePerLot from SymbolRegistry — works for any pair.
+   *
+   *   slPips   = |entryPrice − sl| / pipSize
+   *   lotSize  = riskUSD / (slPips × pipValuePerLot)
+   *
    * @param balance    Account balance in USD
    * @param entryPrice Entry price
    * @param sl         Stop-loss price
    */
   calcLotSize(balance: number, entryPrice: number, sl: number): number {
-    const riskUSD  = balance * (this.riskPct / 100);
-    const slPoints = Math.abs(entryPrice - sl) * 10; // price pts to pips for XAUUSD
-    const lotSize  = riskUSD / (slPoints * XAUUSD_PIP_VALUE_PER_LOT);
-    const rounded  = Math.max(0.01, Math.round(lotSize * 100) / 100);
+    const symCfg        = this.activeSymbol.getConfig();
+    const pipSize       = symCfg?.pipSize       ?? 0.01; // fallback: gold pip
+    const pipValPerLot  = symCfg?.pipValuePerLot ?? 1.0; // fallback: gold pip value
+
+    const riskUSD = balance * (this.riskPct / 100);
+    const slPips  = Math.abs(entryPrice - sl) / pipSize;
+    const lotSize = riskUSD / (slPips * pipValPerLot);
+    const rounded = Math.max(0.01, Math.round(lotSize * 100) / 100);
 
     this.logger.log(
-      `Risk: Balance=$${balance} Risk=${this.riskPct}% → $${riskUSD.toFixed(2)} ` +
-      `SLpts=${slPoints.toFixed(1)} → Lots=${rounded}`,
+      `Risk: ${this.activeSymbol.getSymbol()} Balance=$${balance} Risk=${this.riskPct}% → $${riskUSD.toFixed(2)} ` +
+      `SLpips=${slPips.toFixed(1)} pipVal=$${pipValPerLot} → Lots=${rounded}`,
     );
     return rounded;
   }

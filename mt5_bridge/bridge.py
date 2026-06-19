@@ -459,23 +459,79 @@ def trade_history():
         })
 
     import MetaTrader5 as mt5
-    deals = mt5.history_deals_get(ticket=ticket)
-    if deals is None or len(deals) == 0:
-        orders = mt5.history_orders_get(ticket=ticket)
-        if not orders:
-            return jsonify({'error': f'No history for ticket {ticket}'}), 404
-        deals = mt5.history_deals_get(position=orders[0].position_id)
 
+    # Try position lookup first (most reliable — position ticket == position_id in MT5)
+    deals = mt5.history_deals_get(position=ticket)
+    if not deals:
+        # Fallback: deal ticket lookup
+        deals = mt5.history_deals_get(ticket=ticket)
+    if not deals:
+        # Fallback: via order history
+        orders = mt5.history_orders_get(position=ticket)
+        if orders:
+            deals = mt5.history_deals_get(position=orders[0].position_id)
     if not deals:
         return jsonify({'error': f'No deals found for ticket {ticket}'}), 404
 
-    close_deal = next((d for d in reversed(deals) if d.entry == mt5.DEAL_ENTRY_OUT), deals[-1])
+    close_deal = next((d for d in reversed(deals) if d.entry == 1), deals[-1])  # 1=DEAL_ENTRY_OUT
+    open_deal  = next((d for d in deals if d.entry == 0), None)                 # 0=DEAL_ENTRY_IN
+    # Sum profit across all closing deals (handles partial closes)
+    total_profit = round(sum(d.profit for d in deals if d.entry == 1), 2)
     return jsonify({
-        'ticket':    ticket,
-        'pnl':       round(close_deal.profit, 2),
-        'exitPrice': close_deal.price,
-        'exitTime':  datetime.fromtimestamp(close_deal.time, tz=timezone.utc).isoformat(),
+        'ticket':     ticket,
+        'pnl':        total_profit,
+        'exitPrice':  close_deal.price,
+        'entryPrice': open_deal.price if open_deal else 0,
+        'exitTime':   datetime.utcfromtimestamp(close_deal.time).isoformat() + 'Z',
     })
+
+# ── All Closed Deals (for history import) ─────────────────────────────────────
+
+@app.get('/history_all')
+def history_all():
+    """Return all closed deals from MT5 deal history (last 365 days)."""
+    if MOCK_MODE:
+        return jsonify([])  # No mock history — journal starts fresh
+
+    import MetaTrader5 as mt5
+    # MT5 requires naive UTC datetimes (no timezone info)
+    from_date = datetime.utcnow() - timedelta(days=365)
+    to_date   = datetime.utcnow()
+    deals = mt5.history_deals_get(from_date, to_date)
+    if deals is None:
+        return jsonify([])
+
+    # Group deals by position_id so we can pair entry + exit
+    from collections import defaultdict
+    by_pos = defaultdict(list)
+    for d in deals:
+        by_pos[d.position_id].append(d)
+
+    results = []
+    for pos_id, pos_deals in by_pos.items():
+        # Find the closing deal (DEAL_ENTRY_OUT = 1)
+        close_deal = next((d for d in pos_deals if d.entry == 1), None)
+        if not close_deal:
+            continue
+        # Find the opening deal (DEAL_ENTRY_IN = 0) for entry price
+        open_deal = next((d for d in pos_deals if d.entry == 0), None)
+        entry_price = open_deal.price if open_deal else close_deal.price
+
+        # Closing deal type: 1=SELL closes BUY, 0=BUY closes SELL
+        direction = 'BUY' if close_deal.type == 1 else 'SELL'
+
+        results.append({
+            'ticket':     pos_id,
+            'deal':       close_deal.ticket,
+            'symbol':     close_deal.symbol,
+            'type':       direction,
+            'lots':       close_deal.volume,
+            'entryPrice': entry_price,
+            'exitPrice':  close_deal.price,
+            'pnl':        round(close_deal.profit, 2),
+            'exitTime':   datetime.utcfromtimestamp(close_deal.time).isoformat() + 'Z',
+        })
+    return jsonify(results)
 
 # ── ML Predict ────────────────────────────────────────────────────────────────
 

@@ -21,6 +21,7 @@ datetime g_lastD1  = 0;
 datetime g_lastH1  = 0;
 datetime g_lastM15 = 0;
 datetime g_lastM5  = 0;
+int      g_timerCount = 0;   // used to throttle WriteHistoryAll to once per minute
 
 //+------------------------------------------------------------------+
 //| EA Init                                                           |
@@ -42,6 +43,7 @@ int OnInit()
    WriteCandles(InpSymbol, PERIOD_M15, 200, "M15");
    WriteCandles(InpSymbol, PERIOD_M5,  200, "M5");
    WritePositions(InpSymbol);
+   WriteHistoryAll(InpSymbol);   // Write full deal history immediately on start
 
    Print("KrishViewBridge: started. Writing to MQL5/Files/krishview/");
    return INIT_SUCCEEDED;
@@ -96,6 +98,13 @@ void OnTimer()
    if (d1time != g_lastD1) {
       g_lastD1 = d1time;
       WriteCandles(InpSymbol, PERIOD_D1, 200, "D1");
+   }
+
+   // History — refresh once per minute
+   g_timerCount++;
+   if (g_timerCount >= 60) {
+      g_timerCount = 0;
+      WriteHistoryAll(InpSymbol);
    }
 
    CheckAndExecuteCommands();
@@ -237,6 +246,7 @@ void WritePositions(string symbol)
             "\"type\":\"%s\","
             "\"lots\":%.2f,"
             "\"open_price\":%.5f,"
+            "\"current_price\":%.5f,"
             "\"sl\":%.5f,"
             "\"tp\":%.5f,"
             "\"profit\":%.2f,"
@@ -249,6 +259,7 @@ void WritePositions(string symbol)
          posType,
          PositionGetDouble(POSITION_VOLUME),
          PositionGetDouble(POSITION_PRICE_OPEN),
+         PositionGetDouble(POSITION_PRICE_CURRENT),
          PositionGetDouble(POSITION_SL),
          PositionGetDouble(POSITION_TP),
          PositionGetDouble(POSITION_PROFIT),
@@ -300,8 +311,8 @@ void ExecOrder()
    req.tp           = tp;
    req.magic        = magic;
    req.comment      = comment;
-   req.type_filling = ORDER_FILLING_IOC;
-   req.deviation    = 10;
+   req.type_filling = ORDER_FILLING_RETURN;  // Exness/most brokers: use RETURN not IOC
+   req.deviation    = 20;
 
    if (action == "BUY") {
       req.type  = ORDER_TYPE_BUY;
@@ -313,6 +324,8 @@ void ExecOrder()
 
    bool ok = OrderSend(req, res);
    int  err = GetLastError();
+   // res.retcode is the actual MT5 server code (10xxx), err is the local MQL5 code
+   Print("KrishViewBridge: OrderSend retcode=", res.retcode, " comment=", res.comment, " err=", err);
 
    int fh = FileOpen("krishview\\result_order.json", FILE_WRITE | FILE_TXT | FILE_ANSI);
    if (fh == INVALID_HANDLE) return;
@@ -324,7 +337,8 @@ void ExecOrder()
          "\"lots\":%.2f,"
          "\"direction\":\"%s\","
          "\"comment\":\"%s\","
-         "\"error\":%d"
+         "\"error\":%d,"
+         "\"retcode\":%d"
       "}",
       ok ? "true" : "false",
       (int)res.deal,
@@ -332,12 +346,13 @@ void ExecOrder()
       lots,
       action,
       comment,
-      err
+      err,
+      (int)res.retcode
    ));
    FileClose(fh);
 
    if (ok) Print("KrishViewBridge: Order placed ticket=", res.deal, " ", action, " ", lots, " lots");
-   else    Print("KrishViewBridge: Order FAILED error=", err);
+   else    Print("KrishViewBridge: Order FAILED retcode=", res.retcode, " err=", err);
 }
 
 //--- POST /close
@@ -478,6 +493,85 @@ void ExecPartialClose()
       "{\"ok\":%s,\"profit\":%.2f,\"error\":%d}",
       ok ? "true" : "false", partialPnl, err
    ));
+   FileClose(fh);
+}
+
+//--- Write all closed deals to history_all.json (last 90 days)
+//    Called from OnTimer once per minute + on EA start
+void WriteHistoryAll(string symbol)
+{
+   datetime from = TimeCurrent() - 90 * 86400;
+   if (!HistorySelect(from, TimeCurrent())) {
+      Print("WriteHistoryAll: HistorySelect failed");
+      return;
+   }
+
+   int fh = FileOpen("krishview\\history_all.json", FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if (fh == INVALID_HANDLE) return;
+
+   FileWriteString(fh, "{\"deals\":[");
+
+   bool first = true;
+   int total  = HistoryDealsTotal();
+
+   for (int i = 0; i < total; i++) {
+      ulong deal = HistoryDealGetTicket(i);
+
+      // Only closing deals (DEAL_ENTRY_OUT = position exit)
+      if ((ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      // Only our symbol
+      if (HistoryDealGetString(deal, DEAL_SYMBOL) != symbol) continue;
+
+      long   posId     = HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+      string dealType  = (HistoryDealGetInteger(deal, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+      double lots      = HistoryDealGetDouble(deal, DEAL_VOLUME);
+      double exitPrice = HistoryDealGetDouble(deal, DEAL_PRICE);
+      double pnl       = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                       + HistoryDealGetDouble(deal, DEAL_SWAP)
+                       + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+      datetime exitTime = (datetime)HistoryDealGetInteger(deal, DEAL_TIME);
+
+      // Find the opening deal for this position to get entry price + type
+      double entryPrice = exitPrice;
+      string entryType  = dealType;
+      for (int j = 0; j < total; j++) {
+         ulong oDeal = HistoryDealGetTicket(j);
+         if ((ENUM_DEAL_ENTRY)HistoryDealGetInteger(oDeal, DEAL_ENTRY) != DEAL_ENTRY_IN) continue;
+         if (HistoryDealGetInteger(oDeal, DEAL_POSITION_ID) != posId) continue;
+         entryPrice = HistoryDealGetDouble(oDeal, DEAL_PRICE);
+         entryType  = (HistoryDealGetInteger(oDeal, DEAL_TYPE) == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+         break;
+      }
+
+      if (!first) FileWriteString(fh, ",");
+      first = false;
+
+      FileWriteString(fh, StringFormat(
+         "{"
+            "\"ticket\":%d,"
+            "\"deal\":%d,"
+            "\"symbol\":\"%s\","
+            "\"type\":\"%s\","
+            "\"lots\":%.2f,"
+            "\"entryPrice\":%.5f,"
+            "\"exitPrice\":%.5f,"
+            "\"pnl\":%.2f,"
+            "\"exitTime\":\"%s\""
+         "}",
+         (int)posId,
+         (int)deal,
+         symbol,
+         entryType,
+         lots,
+         entryPrice,
+         exitPrice,
+         pnl,
+         TimeToString(exitTime, TIME_DATE | TIME_SECONDS)
+      ));
+   }
+
+   FileWriteString(fh, "]}");
    FileClose(fh);
 }
 

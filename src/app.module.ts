@@ -14,6 +14,7 @@ import { Analysis } from './analysis/entities/analysis.entity';
 import { Approval } from './approval/entities/approval.entity';
 
 // Feature modules
+import { SymbolModule } from './symbol/symbol.module';
 import { SignalsModule } from './signals/signals.module';
 import { SmcModule } from './smc/smc.module';
 import { Mt5Module } from './mt5/mt5.module';
@@ -49,6 +50,9 @@ import { MlModule } from './ml/ml.module';
         synchronize: true, // auto-creates tables in dev; use migrations in prod
       }),
     }),
+
+    // Symbol registry — global singleton, must come before trading modules
+    SymbolModule,
 
     // Domain modules
     SignalsModule,
