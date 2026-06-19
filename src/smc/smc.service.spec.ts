@@ -213,11 +213,11 @@ describe('premiumDiscount', () => {
 
 // ─── analyze (integration) ────────────────────────────────────────────────────
 
-describe('analyze (4-layer: D1, H1, M15, M5)', () => {
+describe('analyze (5-layer: D1, H4, H1, M15, M5)', () => {
   it('returns null or a valid SMCSignal', () => {
     const result = service.analyze(
       bullCandles(), flatCandles(2000, 200),
-      flatCandles(2000, 200), flatCandles(2000, 150),
+      flatCandles(2000, 200), flatCandles(2000, 200), flatCandles(2000, 150),
     );
     if (result !== null) {
       expect(['BUY', 'SELL']).toContain(result.direction);
@@ -232,7 +232,7 @@ describe('analyze (4-layer: D1, H1, M15, M5)', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = service.analyze(
         bullCandles(1800 + attempt * 50), flatCandles(2000, 200),
-        flatCandles(2000, 200), flatCandles(2000, 150),
+        flatCandles(2000, 200), flatCandles(2000, 200), flatCandles(2000, 150),
       );
       if (result?.direction === 'BUY') {
         expect(result.sl).toBeLessThan(result.entryPrice);
@@ -246,7 +246,7 @@ describe('analyze (4-layer: D1, H1, M15, M5)', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = service.analyze(
         bearCandles(2200 + attempt * 50), flatCandles(2000, 200),
-        flatCandles(2000, 200), flatCandles(2000, 150),
+        flatCandles(2000, 200), flatCandles(2000, 200), flatCandles(2000, 150),
       );
       if (result?.direction === 'SELL') {
         expect(result.sl).toBeGreaterThan(result.entryPrice);

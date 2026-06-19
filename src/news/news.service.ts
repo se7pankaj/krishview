@@ -59,11 +59,20 @@ export class NewsService {
 
     try {
       const resp = await axios.get<any[]>(this.FF_URL, { timeout: 10_000 });
-      this.rawCache    = resp.data ?? [];
-      this.cacheExpiry = now + 60 * 60 * 1000; // cache 1 hour
-      this.logger.log(`News cache refreshed — ${this.rawCache.length} total events this week`);
+      const data = resp.data ?? [];
+      if (data.length > 0) {
+        this.rawCache    = data;
+        this.cacheExpiry = now + 60 * 60 * 1000; // cache 1 hour only when data arrived
+        this.logger.log(`News cache refreshed — ${this.rawCache.length} total events this week`);
+      } else {
+        // API returned empty — retry in 5 minutes, keep stale cache if any
+        this.cacheExpiry = now + 5 * 60 * 1000;
+        this.logger.warn('News API returned empty array — will retry in 5 minutes');
+      }
     } catch (e: any) {
-      this.logger.warn(`News fetch failed: ${e.message} — using stale cache (fail-open)`);
+      // On failure, retry in 2 minutes rather than hammering
+      this.cacheExpiry = now + 2 * 60 * 1000;
+      this.logger.warn(`News fetch failed: ${e.message} — retrying in 2 minutes`);
     }
 
     return this.rawCache;
@@ -125,7 +134,7 @@ export class NewsService {
     return raw
       .map(e => this.toEvent(e))
       .filter(e => e.impact !== 'Holiday')          // skip holidays
-      .filter(e => e.minutesTill > -120)            // drop events > 2h past
+      .filter(e => e.minutesTill > -480)            // show up to 8h past
       .filter(e => e.minutesTill < cutoffMin)       // within requested window
       .sort((a, b) => a.minutesTill - b.minutesTill);
   }

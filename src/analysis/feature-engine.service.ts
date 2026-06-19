@@ -2,20 +2,22 @@
  * analysis/feature-engine.service.ts — Technical Feature Engine
  * ==============================================================
  * Computes structured market features from raw OHLCV candles.
- * Output feeds directly into the GPT-4 structured prompt.
+ * Output feeds directly into the Claude Sonnet structured prompt.
  *
- * 4-layer top-down analysis:
- *   D1  → Macro Direction (HTF bias)
+ * 5-layer top-down analysis:
+ *   D1  → Macro Direction (HTF bias) + PDH/PDL
+ *   H4  → Intermediate Bias + Primary OBs/FVGs (money layer)
  *   H1  → Structural Confirmation (BOS / CHoCH)
- *   M15 → Setup Confirmation (FVG / OB zone)
- *   M5  → Entry Timing (precise trigger)
+ *   M15 → Setup Refinement (FVG / OB within H4 zone)
+ *   M5  → Entry Timing (liquidity sweep + MSS trigger)
  *
  * Features computed:
  *   • EMA 20 / 50 / 200 + alignment + EMA200 distance (ATR units)
- *   • RSI(14) + zone + slope (rising/falling/flat) + divergence
- *   • ATR(14)
- *   • Fibonacci retracement levels + current zone
- *   • lastBosDirection, lastSwingHigh, lastSwingLow
+ *   • RSI(14) + zone + slope + divergence
+ *   • ATR(14), Fibonacci retracement
+ *   • PDH / PDL / PDC (Previous Day High/Low/Close)
+ *   • Killzone detection (London / New York)
+ *   • H4 OBs + FVGs as primary entry zones
  */
 
 import { Injectable } from '@nestjs/common';
@@ -67,36 +69,51 @@ export interface FeatureSet {
   timestamp: string;
   price:     number;
 
-  // ── 4-layer trend ──────────────────────────────────────────────────────────
+  // ── 5-layer trend ──────────────────────────────────────────────────────────
   /** D1 — Macro Direction */
-  d1Trend:     TrendFeatures;
-  /** H1 — Structural Confirmation (priority layer) */
-  h1Trend:     TrendFeatures;
-  /** M15 — Setup Confirmation */
-  m15Trend:    TrendFeatures;
+  d1Trend:  TrendFeatures;
+  /** H4 — Intermediate Bias (money layer) */
+  h4Trend:  TrendFeatures;
+  /** H1 — Structural Confirmation */
+  h1Trend:  TrendFeatures;
+  /** M15 — Setup Refinement */
+  m15Trend: TrendFeatures;
   /** M5 — Entry Timing */
-  m5Trend:     TrendFeatures;
+  m5Trend:  TrendFeatures;
+
+  // ── Previous Day Levels ────────────────────────────────────────────────────
+  pdh: number;   // Previous Day High
+  pdl: number;   // Previous Day Low
+  pdc: number;   // Previous Day Close
+
+  // ── Killzone ───────────────────────────────────────────────────────────────
+  inKillzone:   boolean;
+  killzoneName: 'London' | 'New York' | 'None';
 
   momentum:  MomentumFeatures;
   fibonacci: FibonacciFeatures;
 
   smc: {
     bias:             string;
-    /** BOS detected on H1 confirmation layer */
+    // H4 primary entry zones
+    h4ObPresent:      boolean;
+    h4ObHigh:         number | null;
+    h4ObLow:          number | null;
+    h4FvgPresent:     boolean;
+    h4FvgHigh:        number | null;
+    h4FvgLow:         number | null;
+    h4Zone:           string;
+    h4ZonePct:        number;
+    // H1 structural confirmation
     bos:              boolean;
-    /** CHoCH detected on H1 confirmation layer */
     choch:            boolean;
-    /** Direction of the most recent BOS on H1 */
     lastBosDirection: 'bullish' | 'bearish' | null;
-    /** Price level of the last swing high on H1 */
     lastSwingHigh:    number | null;
-    /** Price level of the last swing low on H1 */
     lastSwingLow:     number | null;
-    /** OB from M15 setup layer */
+    // M15 setup refinement
     obPresent:        boolean;
     obHigh:           number | null;
     obLow:            number | null;
-    /** FVG from M15 setup layer */
     fvgPresent:       boolean;
     fvgHigh:          number | null;
     fvgLow:           number | null;
@@ -271,42 +288,91 @@ export class FeatureEngineService {
     };
   }
 
-  // ─── Full Feature Set (4-layer) ───────────────────────────────────────────
+  // ─── Killzone Detection ───────────────────────────────────────────────────
+
+  detectKillzone(): { inKillzone: boolean; killzoneName: 'London' | 'New York' | 'None' } {
+    const utcHour = new Date().getUTCHours();
+    // London Open: 07:00–10:00 UTC
+    if (utcHour >= 7 && utcHour < 10)  return { inKillzone: true,  killzoneName: 'London'   };
+    // New York Open: 13:00–16:00 UTC
+    if (utcHour >= 13 && utcHour < 16) return { inKillzone: true,  killzoneName: 'New York' };
+    return { inKillzone: false, killzoneName: 'None' };
+  }
+
+  // ─── Previous Day High / Low / Close ──────────────────────────────────────
+
+  computePDLevels(d1Candles: Candle[]): { pdh: number; pdl: number; pdc: number } {
+    // Use second-to-last candle (last fully closed D1 candle)
+    const prev = d1Candles.length >= 2
+      ? d1Candles[d1Candles.length - 2]
+      : d1Candles[d1Candles.length - 1];
+    return { pdh: prev.high, pdl: prev.low, pdc: prev.close };
+  }
+
+  // ─── Full Feature Set (5-layer) ───────────────────────────────────────────
 
   compute(
-    d1Candles:  Candle[],   // D1  — macro direction
-    h1Candles:  Candle[],   // H1  — structural confirmation (priority)
-    m15Candles: Candle[],   // M15 — setup confirmation
+    d1Candles:  Candle[],   // D1  — macro direction + PDH/PDL
+    h4Candles:  Candle[],   // H4  — intermediate bias + primary OBs
+    h1Candles:  Candle[],   // H1  — structural confirmation
+    m15Candles: Candle[],   // M15 — setup refinement
     m5Candles:  Candle[],   // M5  — entry timing
     signal:     SMCSignal | null,
     symbol:     string,
   ): FeatureSet {
     const d1ATR  = this.computeATR(d1Candles);
+    const h4ATR  = this.computeATR(h4Candles);
     const h1ATR  = this.computeATR(h1Candles);
     const m15ATR = this.computeATR(m15Candles);
     const m5ATR  = this.computeATR(m5Candles);
 
     const price = m5Candles[m5Candles.length - 1].close;
 
-    // D1 macro bias
-    const htfBias = this.smcService.getHTFBias(d1Candles);
+    // D1 macro bias + PDH/PDL
+    const htfBias  = this.smcService.getHTFBias(d1Candles);
+    const pdLevels = this.computePDLevels(d1Candles);
 
-    // H1 structural confirmation — BOS / CHoCH / swing levels
-    const h1Structs = this.smcService.detectStructure(h1Candles);
-    const hasBOS    = h1Structs.some(s => s.type === 'BOS');
-    const hasCHoCH  = h1Structs.some(s => s.type === 'CHoCH');
+    // H4 intermediate — OBs, FVGs, zone (primary entry zones)
+    const h4OBs  = this.smcService.detectOrderBlocks(h4Candles);
+    const h4FVGs = this.smcService.detectFVGs(h4Candles);
+    const h4Pd   = this.smcService.premiumDiscount(h4Candles);
+
+    // Best unmitigated H4 OB near price
+    const h4BullOb = [...h4OBs].reverse().find(o =>
+      o.type === 'BULLISH_OB' && price >= o.low * 0.998 && price <= o.high * 1.005,
+    ) ?? null;
+    const h4BearOb = [...h4OBs].reverse().find(o =>
+      o.type === 'BEARISH_OB' && price >= o.low * 0.998 && price <= o.high * 1.005,
+    ) ?? null;
+    const h4ActiveOb = h4BullOb ?? h4BearOb ?? null;
+
+    const h4BullFvg = [...h4FVGs].reverse().find(f =>
+      f.type === 'BULLISH_FVG' && price >= f.low && price <= f.high,
+    ) ?? null;
+    const h4BearFvg = [...h4FVGs].reverse().find(f =>
+      f.type === 'BEARISH_FVG' && price >= f.low && price <= f.high,
+    ) ?? null;
+    const h4ActiveFvg = h4BullFvg ?? h4BearFvg ?? null;
+
+    // H1 structural confirmation — BOS / CHoCH
+    const h1Structs  = this.smcService.detectStructure(h1Candles);
+    const hasBOS     = h1Structs.some(s => s.type === 'BOS');
+    const hasCHoCH   = h1Structs.some(s => s.type === 'CHoCH');
     const bosDetails = this.extractBosDetails(h1Structs, h1Candles);
 
-    // M15 — OB / FVG zone identification
-    const m15Sweeps = this.smcService.detectLiquiditySweeps(m15Candles);
+    // M15 — refinement OBs/FVGs
+    const m15Sweeps      = this.smcService.detectLiquiditySweeps(m15Candles);
     const liquiditySwept = m15Sweeps.some(s => s.swept);
-    const pd = this.smcService.premiumDiscount(m15Candles);
+    const m15Pd          = this.smcService.premiumDiscount(m15Candles);
 
-    // Momentum computed on H1 (most signal-rich for gold)
+    // Momentum on H1
     const momentum = this.computeMomentum(h1Candles);
 
-    // Fibonacci from M15 swing range
+    // Fibonacci from M15 swing
     const fibonacci = this.computeFibonacci(m15Candles);
+
+    // Killzone
+    const { inKillzone, killzoneName } = this.detectKillzone();
 
     return {
       symbol,
@@ -314,29 +380,51 @@ export class FeatureEngineService {
       price,
 
       d1Trend:  this.computeTrend(d1Candles,  d1ATR),
+      h4Trend:  this.computeTrend(h4Candles,  h4ATR),
       h1Trend:  this.computeTrend(h1Candles,  h1ATR),
       m15Trend: this.computeTrend(m15Candles, m15ATR),
       m5Trend:  this.computeTrend(m5Candles,  m5ATR),
+
+      pdh: pdLevels.pdh,
+      pdl: pdLevels.pdl,
+      pdc: pdLevels.pdc,
+
+      inKillzone,
+      killzoneName,
 
       momentum,
       fibonacci,
 
       smc: {
-        bias:             htfBias,
+        bias: htfBias,
+
+        // H4 primary entry zones
+        h4ObPresent:  !!h4ActiveOb,
+        h4ObHigh:     h4ActiveOb?.high ?? null,
+        h4ObLow:      h4ActiveOb?.low  ?? null,
+        h4FvgPresent: !!h4ActiveFvg,
+        h4FvgHigh:    h4ActiveFvg?.high ?? null,
+        h4FvgLow:     h4ActiveFvg?.low  ?? null,
+        h4Zone:       h4Pd.zone,
+        h4ZonePct:    h4Pd.pct,
+
+        // H1 structural confirmation
         bos:              hasBOS,
         choch:            hasCHoCH,
         lastBosDirection: bosDetails.lastBosDirection,
         lastSwingHigh:    bosDetails.lastSwingHigh,
         lastSwingLow:     bosDetails.lastSwingLow,
-        obPresent:        !!signal?.ob,
-        obHigh:           signal?.ob?.high ?? null,
-        obLow:            signal?.ob?.low ?? null,
-        fvgPresent:       !!signal?.fvg,
-        fvgHigh:          signal?.fvg?.high ?? null,
-        fvgLow:           signal?.fvg?.low ?? null,
+
+        // M15 setup refinement
+        obPresent:      !!signal?.ob,
+        obHigh:         signal?.ob?.high  ?? null,
+        obLow:          signal?.ob?.low   ?? null,
+        fvgPresent:     !!signal?.fvg,
+        fvgHigh:        signal?.fvg?.high ?? null,
+        fvgLow:         signal?.fvg?.low  ?? null,
         liquiditySwept,
-        zone:             pd.zone,
-        zonePct:          pd.pct,
+        zone:           m15Pd.zone,
+        zonePct:        m15Pd.pct,
       },
     };
   }

@@ -161,6 +161,16 @@ def candles():
     return jsonify({"candles": all_candles[-count:]})
 
 
+@app.get("/history_all")
+def history_all():
+    """All closed deals for the last 90 days, written by WriteHistoryAll in the EA.
+    EA refreshes this file on start and every 60 seconds."""
+    data = read_json("history_all.json")
+    if data is None:
+        return jsonify([])   # EA not yet written it — return empty (not error)
+    return jsonify(data.get("deals", []))
+
+
 @app.get("/positions")
 def positions():
     symbol = request.args.get("symbol", "XAUUSD")

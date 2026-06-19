@@ -231,13 +231,15 @@ describe('computeTrend', () => {
 describe('compute (full FeatureSet)', () => {
   it('returns a FeatureSet with required top-level keys', () => {
     const d1  = rising(1900, 2, 250);
+    const h4  = rising(1930, 1.5, 250);
     const h1  = rising(1950, 1, 250);
     const m15 = rising(2000, 0.5, 200);
     const m5  = rising(2010, 0.1, 200);
-    const result = service.compute(d1, h1, m15, m5, null, 'XAUUSD');
+    const result = service.compute(d1, h4, h1, m15, m5, null, 'XAUUSD');
     expect(result).toHaveProperty('symbol', 'XAUUSD');
     expect(result).toHaveProperty('price');
     expect(result).toHaveProperty('d1Trend');
+    expect(result).toHaveProperty('h4Trend');
     expect(result).toHaveProperty('h1Trend');
     expect(result).toHaveProperty('m15Trend');
     expect(result).toHaveProperty('m5Trend');
@@ -249,7 +251,7 @@ describe('compute (full FeatureSet)', () => {
   it('price equals last M5 candle close', () => {
     const m5 = rising(2010, 0.1, 200);
     const result = service.compute(
-      rising(1900, 2, 250), rising(1950, 1, 250),
+      rising(1900, 2, 250), rising(1930, 1.5, 250), rising(1950, 1, 250),
       rising(2000, 0.5, 200), m5, null, 'XAUUSD',
     );
     expect(result.price).toBe(m5[m5.length - 1].close);
@@ -257,7 +259,7 @@ describe('compute (full FeatureSet)', () => {
 
   it('smc.bos is boolean', () => {
     const result = service.compute(
-      rising(1900, 2, 250), rising(1950, 1, 250),
+      rising(1900, 2, 250), rising(1930, 1.5, 250), rising(1950, 1, 250),
       rising(2000, 0.5, 200), rising(2010, 0.1, 200),
       null, 'XAUUSD',
     );

@@ -57,8 +57,18 @@ export class RiskService {
   private get maxConsecLosses():   number { return parseInt(this.config.get('MAX_CONSEC_LOSSES', '3'), 10); }
   private get consecPausHours():   number { return parseInt(this.config.get('CONSEC_PAUSE_HOURS', '24'), 10); }
 
+  /** Set SKIP_SESSION_FILTER=true in .env to allow trading at any hour (testing only) */
+  private get skipSessionFilter(): boolean {
+    return this.config.get<string>('SKIP_SESSION_FILTER', 'false') === 'true';
+  }
+
   /** Is the current UTC time within London or NY session? */
   isAllowedSession(): boolean {
+    if (this.skipSessionFilter) {
+      this.logger.warn('Risk: SKIP_SESSION_FILTER=true — session check bypassed (testing mode)');
+      return true;
+    }
+
     const now  = new Date();
     const gmtH = now.getUTCHours();
     const day  = now.getUTCDay(); // 0=Sun, 6=Sat
@@ -72,7 +82,7 @@ export class RiskService {
     const inNY     = gmtH >= this.nyStart      && gmtH < this.nyEnd;
 
     if (!inLondon && !inNY) {
-      this.logger.log(`Risk: Outside trading sessions (GMT ${gmtH}:xx)`);
+      this.logger.log(`Risk: Outside trading sessions (GMT ${gmtH}:xx) London=${this.londonStart}-${this.londonEnd} NY=${this.nyStart}-${this.nyEnd}`);
       return false;
     }
     return true;

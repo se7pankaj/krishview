@@ -151,7 +151,15 @@
 <div class="header">
   <h1>Krish<span>View</span> &nbsp;🤖&nbsp; <span style="font-weight:400;font-size:14px;color:var(--muted)">Trading Dashboard</span></h1>
   <div class="header-right">
+    <span id="livePriceBox" style="display:none;background:#0d1117;border:1px solid var(--border);border-radius:5px;padding:3px 10px;font-size:12px">
+      XAUUSD &nbsp;
+      <span id="liveBid" style="color:var(--red);font-weight:700">—</span>
+      &nbsp;/&nbsp;
+      <span id="liveAsk" style="color:var(--green);font-weight:700">—</span>
+    </span>
     <button class="trigger-btn" id="triggerBtn" onclick="runTrigger()">⚡ Run Analysis</button>
+    <button class="trigger-btn" id="reconcileBtn" onclick="runReconcile()" title="Fix trades with missing PnL" style="background:#1a2a1a;border-color:#2ea043">🔧 Fix PnL</button>
+    <button class="trigger-btn" id="syncBtn" onclick="runSyncHistory()" title="Import closed trades from MT5 history">↻ Sync History</button>
     <span><span class="status-dot" id="statusDot"></span><span id="statusText" style="font-size:12px">Connecting...</span></span>
     <span class="last-update" id="lastUpdate"></span>
   </div>
@@ -538,7 +546,7 @@ async function refreshApprovals() {
     const dir      = (a.direction || '').toUpperCase();
     const dirColor = dir === 'BUY' ? 'var(--green)' : 'var(--red)';
     const expiresIn = a.expiresAt ? Math.max(0, Math.ceil((new Date(a.expiresAt) - Date.now()) / 60000)) : '?';
-    return `<div class="approval-card" style="border-left:3px solid ${dirColor}">
+    return `<div class="approval-card" style="border-left:3px solid ${dirColor}" id="approval-card-${a.id}">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <div>
           <span style="color:${dirColor};font-size:20px;font-weight:700">${dir === 'BUY' ? '▲' : '▼'} ${dir}</span>
@@ -556,31 +564,75 @@ async function refreshApprovals() {
         <div><div style="color:var(--muted);font-size:10px">RR</div><div style="font-size:14px">1:${a.rr ?? '—'}</div></div>
       </div>
       ${renderBreakdown(a.breakdown)}
+      <div style="display:flex;gap:10px;margin-top:12px">
+        <button onclick="resolveApproval(${a.id},'approve')" style="flex:1;padding:10px;background:var(--green);color:#000;border:none;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer">✅ APPROVE</button>
+        <button onclick="resolveApproval(${a.id},'reject')" style="flex:1;padding:10px;background:var(--red);color:#fff;border:none;border-radius:6px;font-weight:700;font-size:14px;cursor:pointer">❌ REJECT</button>
+      </div>
     </div>`;
   }).join('');
 }
 
+async function resolveApproval(id, action) {
+  const card = document.getElementById(`approval-card-${id}`);
+  if (card) { card.style.opacity = '0.5'; card.style.pointerEvents = 'none'; }
+  try {
+    const res = await fetch(`/dashboard/${action}/${id}`, { method: 'POST' });
+    const json = await res.json();
+    if (json.ok) {
+      if (card) card.remove();
+      alert(action === 'approve' ? '✅ Trade approved — executing in MT5…' : '❌ Trade rejected.');
+    } else {
+      if (card) { card.style.opacity = '1'; card.style.pointerEvents = ''; }
+      alert('Error: ' + (json.error ?? 'Unknown error'));
+    }
+  } catch (e) {
+    if (card) { card.style.opacity = '1'; card.style.pointerEvents = ''; }
+    alert('Request failed: ' + e.message);
+  }
+}
+
 // ── Positions ────────────────────────────────────────────────────────────────
 async function refreshPositions() {
-  const d = await load('/dashboard/positions');
+  const [d, tick] = await Promise.all([
+    load('/dashboard/positions'),
+    load('/dashboard/price'),
+  ]);
+
+  // Show live bid/ask in header
+  if (tick && tick.bid) {
+    document.getElementById('livePriceBox').style.display = '';
+    document.getElementById('liveBid').textContent = parseFloat(tick.bid).toFixed(2);
+    document.getElementById('liveAsk').textContent = parseFloat(tick.ask).toFixed(2);
+  }
+
   const tbody = document.getElementById('positionsTable');
   if (!d || !d.length) {
     tbody.innerHTML = '<tr><td colspan="10" class="empty">No open positions</td></tr>';
     return;
   }
-  tbody.innerHTML = d.map(p => `
+
+  // Current price: prefer per-position current_price from EA, fall back to live tick
+  const livePrice = tick ? tick.bid : null;
+
+  tbody.innerHTML = d.map(p => {
+    const cur = p.current_price > 0 ? parseFloat(p.current_price).toFixed(2)
+                  : livePrice ? parseFloat(livePrice).toFixed(2) : '—';
+    const slTxt = p.sl > 0 ? fmtN(p.sl) : '<span style="color:var(--muted)">—</span>';
+    const tpTxt = p.tp > 0 ? fmtN(p.tp) : '<span style="color:var(--muted)">—</span>';
+    return `
     <tr>
       <td style="color:var(--muted)">#${p.ticket}</td>
       <td>${p.symbol}</td>
       <td><span class="badge badge-${(p.type||'').toLowerCase()}">${p.type}</span></td>
       <td>${p.lots}</td>
       <td>${fmtN(p.open_price)}</td>
-      <td>—</td>
-      <td style="color:var(--red)">${fmtN(p.sl)}</td>
-      <td style="color:var(--green)">${fmtN(p.tp)}</td>
+      <td style="color:var(--yellow)">${cur}</td>
+      <td style="color:var(--red)">${slTxt}</td>
+      <td style="color:var(--green)">${tpTxt}</td>
       <td>${fmt(p.profit)}</td>
       <td style="color:var(--muted)">${duration(p.open_time)}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 }
 
 // ── Recent Trades ────────────────────────────────────────────────────────────
@@ -634,7 +686,7 @@ function renderNews() {
   });
 
   if (!events.length) {
-    container.innerHTML = '<div class="empty">No events for selected filter ✅</div>';
+    container.innerHTML = '<div class="empty">No upcoming events in this window 📅</div>';
     return;
   }
 
@@ -679,7 +731,14 @@ function renderNews() {
 
 async function refreshNews() {
   const d = await load('/dashboard/news');
-  if (!d) return;
+  if (!d) {
+    // API call failed — show error but keep existing events if any
+    if (!allNewsEvents.length) {
+      const container = document.getElementById('newsList');
+      if (container) container.innerHTML = '<div class="empty" style="color:var(--red)">⚠️ Calendar unavailable — retrying…</div>';
+    }
+    return;
+  }
   allNewsEvents = d;
   renderNews();
 }
@@ -712,6 +771,53 @@ async function runTrigger() {
   }, 4000);
 }
 
+// ── Sync MT5 History ─────────────────────────────────────────────────────────
+async function runSyncHistory() {
+  const btn = document.getElementById('syncBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Syncing...';
+  btn.className = 'trigger-btn running';
+
+  try {
+    const res = await fetch('/dashboard/sync-history', { method: 'POST' });
+    const d   = await res.json();
+    btn.textContent = d.ok ? `✅ ${d.totalImported} trades` : '❌ Failed';
+    btn.className   = d.ok ? 'trigger-btn done' : 'trigger-btn';
+    if (d.ok) {
+      setTimeout(() => { refreshStats(); refreshSummary(); }, 500);
+    }
+  } catch {
+    btn.textContent = '❌ Error';
+    btn.className   = 'trigger-btn';
+  }
+
+  setTimeout(() => {
+    btn.disabled    = false;
+    btn.textContent = '↻ Sync History';
+    btn.className   = 'trigger-btn';
+  }, 4000);
+}
+
+async function runReconcile() {
+  const btn = document.getElementById('reconcileBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Fixing...';
+  try {
+    const res = await fetch('/dashboard/reconcile', { method: 'POST' });
+    const d   = await res.json();
+    btn.textContent = d.ok ? `✅ Fixed ${d.fixed}` : '❌ Error';
+    if (d.fixed > 0) {
+      setTimeout(() => { refreshTrades(); refreshStats(); refreshSummary(); }, 500);
+    }
+  } catch {
+    btn.textContent = '❌ Error';
+  }
+  setTimeout(() => {
+    btn.disabled    = false;
+    btn.textContent = '🔧 Fix PnL';
+  }, 4000);
+}
+
 // ── Refresh cycles ───────────────────────────────────────────────────────────
 async function refreshFast() {
   await Promise.all([refreshSummary(), refreshPositions(), refreshApprovals()]);
@@ -723,8 +829,8 @@ async function refreshSlow() {
 // Boot
 refreshFast();
 refreshSlow();
-setInterval(refreshFast, 5_000);   // every 5s
-setInterval(refreshSlow, 30_000);  // every 30s
+setInterval(refreshFast, 2_000);   // every 2s — balance, equity, positions, live price
+setInterval(refreshSlow, 30_000);  // every 30s — SMC, trades, news, stats, analysis
 </script>
 </body>
 </html>

@@ -6,11 +6,13 @@ import { FeatureEngineService } from './feature-engine.service';
 import { AiReasoningService } from './ai-reasoning.service';
 import { ConfidenceExplainerService } from './confidence-explainer.service';
 import { SmcModule } from '../smc/smc.module';
+import { ConfluenceModule } from '../confluence/confluence.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Analysis]),
     SmcModule,
+    ConfluenceModule,
   ],
   providers: [AnalysisService, FeatureEngineService, AiReasoningService, ConfidenceExplainerService],
   exports: [AnalysisService, ConfidenceExplainerService],
