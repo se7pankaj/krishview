@@ -52,6 +52,7 @@ export class AnalysisService {
 
     if (!smcSignal) {
       this.logger.log('Analysis: SMC returned null — skip');
+      await this.logNoSignal(symbol, 'NO_SETUP', ['No valid SMC setup this cycle']);
       return null;
     }
 
@@ -65,6 +66,7 @@ export class AnalysisService {
       this.logger.warn(
         `Analysis: Confluence BLOCKED [${smcSignal.direction}] — ${confluenceResult.hardBlocks.join(' | ')}`,
       );
+      await this.logNoSignal(symbol, 'BLOCKED', confluenceResult.hardBlocks, smcSignal.direction, smcSignal.confidence);
       return null;
     }
     this.logger.log(
@@ -77,6 +79,11 @@ export class AnalysisService {
       this.logger.log(
         `Analysis: Below Tier${confluenceResult.tradingTier} threshold ` +
         `(${confluenceResult.adjustedConfidence}% < ${confluenceResult.tierThreshold}%) — skip`,
+      );
+      await this.logNoSignal(
+        symbol, 'BELOW_TIER',
+        [`Adjusted ${confluenceResult.adjustedConfidence}% < Tier${confluenceResult.tradingTier} threshold ${confluenceResult.tierThreshold}%`],
+        smcSignal.direction, confluenceResult.adjustedConfidence,
       );
       return null;
     }
@@ -105,6 +112,11 @@ export class AnalysisService {
 
     if (!hasSignal) {
       this.logger.log('Analysis: AI said WAIT — skip');
+      await this.logNoSignal(
+        symbol, 'WAIT',
+        recommendation?.reasons ?? ['AI reviewed full context and said WAIT'],
+        adjustedSignal.direction, recommendation?.confidence ?? adjustedSignal.confidence,
+      );
       return null;
     }
 
@@ -145,6 +157,33 @@ export class AnalysisService {
 
   async updateStatus(id: number, status: string): Promise<void> {
     await this.repo.update(id, { status });
+  }
+
+  /**
+   * Records a no-trade cycle (NO_SETUP / BLOCKED / BELOW_TIER / WAIT) so the
+   * dashboard's "Latest AI Analysis" card reflects what actually just
+   * happened, instead of silently leaving the last real trade idea on
+   * screen indefinitely. Best-effort only — never throws, since a logging
+   * failure here must not interrupt the calling cycle.
+   */
+  private async logNoSignal(
+    symbol: string,
+    status: 'NO_SETUP' | 'BLOCKED' | 'BELOW_TIER' | 'WAIT',
+    reasons: string[],
+    direction?: string,
+    confidence?: number,
+  ): Promise<void> {
+    try {
+      await this.repo.save(this.repo.create({
+        symbol,
+        status,
+        aiDecision:   direction ?? 'WAIT',
+        aiConfidence: confidence ?? 0,
+        aiReasons:    reasons,
+      }));
+    } catch (e: any) {
+      this.logger.warn(`logNoSignal failed (non-fatal): ${e?.message}`);
+    }
   }
 
   async saveBreakdown(id: number, breakdown: Record<string, any>): Promise<void> {
