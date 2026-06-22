@@ -18,6 +18,7 @@ import { MlService } from '../ml/ml.service';
 import { ConfidenceExplainerService } from '../analysis/confidence-explainer.service';
 import { NewsService } from '../news/news.service';
 import { ActiveSymbolService } from './active-symbol.service';
+import { SymbolSpecService } from '../symbol/symbol-spec.service';
 import { getActiveSession } from '../common/symbol-registry';
 
 @Injectable()
@@ -52,6 +53,7 @@ export class TradingService implements OnApplicationBootstrap {
     private readonly explainer:    ConfidenceExplainerService,
     private readonly news:         NewsService,
     private readonly activeSymbol: ActiveSymbolService,
+    private readonly symbolSpec:   SymbolSpecService,
   ) {
     this.htfTf     = this.config.get<string>('HTF_TF',     'D1');
     this.h4Tf      = this.config.get<string>('H4_TF',      'H4');
@@ -188,8 +190,20 @@ export class TradingService implements OnApplicationBootstrap {
     this.logger.log(`════ SMC Cycle START — ${this.symbol} ════`);
 
     // Weekend gate — hard block for non-crypto symbols, never bypassed.
+    // Cheap, zero-dependency heuristic — always available even if MetaApi
+    // is unreachable, so this stays as the first line of defense.
     if (this.isWeekendMarketClosed()) {
       this.logger.log(`SMC Cycle SKIPPED — ${this.symbol} market closed for the weekend`);
+      return;
+    }
+
+    // Broker-verified market-open check — catches what the heuristic above
+    // can't: holidays, maintenance windows, and whether THIS broker really
+    // keeps crypto open on weekends (settles that with real data instead of
+    // assuming). Fails open (returns true) if unreachable/uncached, so it
+    // layers on top of the hardcoded gate rather than replacing it.
+    if (!(await this.symbolSpec.isMarketOpen(this.symbol))) {
+      this.logger.log(`SMC Cycle SKIPPED — ${this.symbol} market closed per broker's real trading schedule`);
       return;
     }
 
@@ -362,7 +376,7 @@ export class TradingService implements OnApplicationBootstrap {
     this.logger.log('[6/6] APPROVED — placing order in MT5…');
     await this.analysis.updateStatus(result.analysisId, 'APPROVED');
 
-    const lots = this.risk.calcLotSize(account.balance, entry, sl);
+    const lots = await this.risk.calcLotSize(account.balance, entry, sl);
     let orderResult: { ticket: number; price: number };
 
     try {

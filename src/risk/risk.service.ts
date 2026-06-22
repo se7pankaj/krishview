@@ -13,6 +13,7 @@ import { NewsService } from '../news/news.service';
 import { SMCSignal } from '../smc/smc.service';
 import { TelegramService } from '../telegram.service';
 import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { SymbolSpecService } from '../symbol/symbol-spec.service';
 import { getActiveSession } from '../common/symbol-registry';
 
 export interface RiskCheckResult {
@@ -42,6 +43,7 @@ export class RiskService {
     private readonly news:          NewsService,
     private readonly telegram:      TelegramService,
     private readonly activeSymbol:  ActiveSymbolService,
+    private readonly symbolSpec:    SymbolSpecService,
   ) {}
 
   private get riskPct():         number { return parseFloat(this.config.get('RISK_PCT', '1')); }
@@ -51,6 +53,17 @@ export class RiskService {
   private get confidenceMin():   number { return parseFloat(this.config.get('CONFIDENCE_THRESHOLD', '60')); }
   private get maxConsecLosses(): number { return parseInt(this.config.get('MAX_CONSEC_LOSSES', '3'), 10); }
   private get consecPausHours(): number { return parseInt(this.config.get('CONSEC_PAUSE_HOURS', '24'), 10); }
+
+  /**
+   * Absolute hard cap on risk per trade (doc: position sizing bug, ticket
+   * #1412058401 — a 328pt SL with 0.01 min lot risked 9.3% of balance
+   * instead of the intended 1%). If the SL is so wide that the ideal lot
+   * size falls below the broker minimum, calcLotSize() floors it to 0.01
+   * lots — which can silently risk far more than RISK_PCT. Regardless of
+   * what RISK_PCT targets, no single trade is allowed past this % of
+   * balance. Default 3% — tune between 2-3% via MAX_TRADE_RISK_PCT in .env.
+   */
+  private get maxTradeRiskPct(): number { return parseFloat(this.config.get('MAX_TRADE_RISK_PCT', '3')); }
 
   /** Spread limit from SymbolRegistry; env SPREAD_LIMIT is the global fallback */
   private get spreadLimit(): number {
@@ -65,9 +78,13 @@ export class RiskService {
 
   /**
    * Is the current UTC time within any active session for the selected symbol?
-   * Sessions are read from SymbolRegistry — no hardcoded London/NY hours.
+   * Sessions are read from SymbolRegistry — no hardcoded London/NY hours for
+   * the killzone part. The weekend check is layered: a cheap day-of-week
+   * heuristic (always available) PLUS a broker-verified real-schedule check
+   * via SymbolSpecService (catches holidays/maintenance and settles whether
+   * THIS broker really keeps crypto open on weekends, rather than assuming).
    */
-  isAllowedSession(): boolean {
+  async isAllowedSession(): Promise<boolean> {
     if (this.skipSessionFilter) {
       this.logger.warn('Risk: SKIP_SESSION_FILTER=true — session check bypassed (testing mode)');
       return true;
@@ -84,6 +101,13 @@ export class RiskService {
     // the hard weekend gate in TradingService.isWeekendMarketClosed().
     if (symCfg?.category !== 'crypto' && (day === 0 || day === 6)) {
       this.logger.log('Risk: Weekend — session closed');
+      return false;
+    }
+
+    // Broker-verified layer — fails open (true) if uncached/unreachable, so
+    // it only ever tightens the gate above, never substitutes for it.
+    if (!(await this.symbolSpec.isMarketOpen(sym))) {
+      this.logger.log(`Risk: ${sym} closed per broker's real trading schedule`);
       return false;
     }
 
@@ -106,23 +130,33 @@ export class RiskService {
    *   slPips   = |entryPrice − sl| / pipSize
    *   lotSize  = riskUSD / (slPips × pipValuePerLot)
    *
+   * Lot size is then rounded to the broker's real lotStep and clamped to
+   * [minLot, maxLot] — both fetched from MetaApi via SymbolSpecService
+   * (cached in Postgres, synced every 24h) instead of a hardcoded 0.01.
+   * This is what's checked against MAX_TRADE_RISK_PCT in riskCheck() below.
+   *
    * @param balance    Account balance in USD
    * @param entryPrice Entry price
    * @param sl         Stop-loss price
    */
-  calcLotSize(balance: number, entryPrice: number, sl: number): number {
-    const symCfg        = this.activeSymbol.getConfig();
-    const pipSize       = symCfg?.pipSize       ?? 0.01; // fallback: gold pip
-    const pipValPerLot  = symCfg?.pipValuePerLot ?? 1.0; // fallback: gold pip value
+  async calcLotSize(balance: number, entryPrice: number, sl: number): Promise<number> {
+    const symbol         = this.activeSymbol.getSymbol();
+    const symCfg         = this.activeSymbol.getConfig();
+    const pipSize        = symCfg?.pipSize       ?? 0.01; // fallback: gold pip
+    const pipValPerLot   = symCfg?.pipValuePerLot ?? 1.0; // fallback: gold pip value
+    const { minLot, maxLot, lotStep } = await this.symbolSpec.getLotRules(symbol);
 
-    const riskUSD = balance * (this.riskPct / 100);
-    const slPips  = Math.abs(entryPrice - sl) / pipSize;
-    const lotSize = riskUSD / (slPips * pipValPerLot);
-    const rounded = Math.max(0.01, Math.round(lotSize * 100) / 100);
+    const riskUSD  = balance * (this.riskPct / 100);
+    const slPips   = Math.abs(entryPrice - sl) / pipSize;
+    const lotSize  = riskUSD / (slPips * pipValPerLot);
+    const stepped  = Math.round(lotSize / lotStep) * lotStep;
+    const clamped  = Math.min(maxLot, Math.max(minLot, stepped));
+    const rounded  = +clamped.toFixed(5);
 
     this.logger.log(
-      `Risk: ${this.activeSymbol.getSymbol()} Balance=$${balance} Risk=${this.riskPct}% → $${riskUSD.toFixed(2)} ` +
-      `SLpips=${slPips.toFixed(1)} pipVal=$${pipValPerLot} → Lots=${rounded}`,
+      `Risk: ${symbol} Balance=$${balance} Risk=${this.riskPct}% → $${riskUSD.toFixed(2)} ` +
+      `SLpips=${slPips.toFixed(1)} pipVal=$${pipValPerLot} → Lots=${rounded} ` +
+      `(broker min=${minLot} step=${lotStep} max=${maxLot})`,
     );
     return rounded;
   }
@@ -145,7 +179,7 @@ export class RiskService {
     }
 
     // 1. Session
-    if (!this.isAllowedSession()) {
+    if (!(await this.isAllowedSession())) {
       return { ok: false, reason: 'Outside allowed trading sessions' };
     }
 
@@ -168,6 +202,35 @@ export class RiskService {
     // 4. RR ratio
     if (signal.rr < this.minRR) {
       return { ok: false, reason: `RR too low: ${signal.rr} < ${this.minRR}` };
+    }
+
+    // 4b. Min-lot-floor risk blowup guard.
+    // When the SL is unusually wide, the ideal lot size to hit RISK_PCT can
+    // fall below the broker's real minimum lot — calcLotSize() floors it
+    // there, which can silently risk many times the intended %. Block
+    // instead of letting an oversized trade reach approval looking normal.
+    {
+      const symCfg       = this.activeSymbol.getConfig();
+      const pipSize      = symCfg?.pipSize        ?? 0.01;
+      const pipValPerLot = symCfg?.pipValuePerLot ?? 1.0;
+      const lots         = await this.calcLotSize(account.balance, signal.entryPrice, signal.sl);
+      const slPips       = Math.abs(signal.entryPrice - signal.sl) / pipSize;
+      const actualRiskUsd = slPips * pipValPerLot * lots;
+      const actualRiskPct = (actualRiskUsd / account.balance) * 100;
+      const maxAllowedPct = this.maxTradeRiskPct;
+
+      if (actualRiskPct > maxAllowedPct) {
+        this.logger.warn(
+          `Risk: BLOCKED — min-lot floor (${lots} lots) on a ${slPips.toFixed(0)}pt SL would risk ` +
+          `$${actualRiskUsd.toFixed(2)} (${actualRiskPct.toFixed(2)}% of balance), ` +
+          `exceeding the ${maxAllowedPct}% hard cap (target was ${this.riskPct}%)`,
+        );
+        return {
+          ok: false,
+          reason: `SL too wide for min lot size — would risk ${actualRiskPct.toFixed(2)}% of balance ` +
+                  `(target ${this.riskPct}%, hard cap ${maxAllowedPct}%)`,
+        };
+      }
     }
 
     // 5. Daily loss circuit breaker (doc §16.3)

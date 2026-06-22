@@ -12,6 +12,7 @@ import { Signal } from './signals/entities/signal.entity';
 import { Trade } from './journal/entities/trade.entity';
 import { Analysis } from './analysis/entities/analysis.entity';
 import { Approval } from './approval/entities/approval.entity';
+import { SymbolSpec } from './symbol/entities/symbol-spec.entity';
 
 // Feature modules
 import { SymbolModule } from './symbol/symbol.module';
@@ -46,7 +47,7 @@ import { MlModule } from './ml/ml.module';
         username: config.get<string>('DB_USERNAME'),
         password: config.get<string>('DB_PASSWORD'),
         database: config.get<string>('DB_DATABASE'),
-        entities: [Signal, Trade, Analysis, Approval],
+        entities: [Signal, Trade, Analysis, Approval, SymbolSpec],
         synchronize: true, // auto-creates tables in dev; use migrations in prod
       }),
     }),

@@ -79,31 +79,31 @@ describe('calcLotSize', () => {
   let service: RiskService;
   beforeEach(async () => { service = await buildService(); });
 
-  it('is always >= 0.01 (minimum lot)', () => {
-    const lots = service.calcLotSize(100, 2000, 1999.99); // tiny balance, tiny SL
+  it('is always >= 0.01 (minimum lot)', async () => {
+    const lots = await service.calcLotSize(100, 2000, 1999.99); // tiny balance, tiny SL
     expect(lots).toBeGreaterThanOrEqual(0.01);
   });
 
-  it('scales with balance — double balance → double lots', () => {
-    const l1 = service.calcLotSize(10_000, 2000, 1990);
-    const l2 = service.calcLotSize(20_000, 2000, 1990);
+  it('scales with balance — double balance → double lots', async () => {
+    const l1 = await service.calcLotSize(10_000, 2000, 1990);
+    const l2 = await service.calcLotSize(20_000, 2000, 1990);
     expect(l2).toBeCloseTo(l1 * 2, 1);
   });
 
-  it('scales inversely with SL distance — wider SL → fewer lots', () => {
-    const l1 = service.calcLotSize(10_000, 2000, 1990); // 10pt SL
-    const l2 = service.calcLotSize(10_000, 2000, 1980); // 20pt SL
+  it('scales inversely with SL distance — wider SL → fewer lots', async () => {
+    const l1 = await service.calcLotSize(10_000, 2000, 1990); // 10pt SL
+    const l2 = await service.calcLotSize(10_000, 2000, 1980); // 20pt SL
     expect(l1).toBeGreaterThan(l2);
   });
 
-  it('correct lot for $10k balance, 1% risk, 10pt SL: expect 0.10', () => {
+  it('correct lot for $10k balance, 1% risk, 10pt SL: expect 0.10', async () => {
     // riskUSD = 100, slPoints = 100, pipValue = 10 → lots = 100/(100*10) = 0.10
-    const lots = service.calcLotSize(10_000, 2000, 1990);
+    const lots = await service.calcLotSize(10_000, 2000, 1990);
     expect(lots).toBeCloseTo(0.10, 2);
   });
 
-  it('correct lot for $5k balance, 10pt SL: expect 0.05', () => {
-    const lots = service.calcLotSize(5_000, 2000, 1990);
+  it('correct lot for $5k balance, 10pt SL: expect 0.05', async () => {
+    const lots = await service.calcLotSize(5_000, 2000, 1990);
     expect(lots).toBeCloseTo(0.05, 2);
   });
 });
@@ -113,27 +113,25 @@ describe('calcLotSize', () => {
 describe('isAllowedSession', () => {
   it('returns boolean', async () => {
     const service = await buildService();
-    expect(typeof service.isAllowedSession()).toBe('boolean');
+    expect(typeof (await service.isAllowedSession())).toBe('boolean');
   });
 
   // We can't mock Date easily without jest.spyOn, so we test the logic
   // by checking the return value at the actual current time.
-  it('returns false on Saturday', () => {
+  it('returns false on Saturday', async () => {
     // Saturday = 6
     jest.spyOn(Date.prototype, 'getUTCDay').mockReturnValue(6);
     jest.spyOn(Date.prototype, 'getUTCHours').mockReturnValue(10);
-    buildService().then(s => {
-      expect(s.isAllowedSession()).toBe(false);
-    });
+    const s = await buildService();
+    expect(await s.isAllowedSession()).toBe(false);
     jest.restoreAllMocks();
   });
 
-  it('returns false on Sunday', () => {
+  it('returns false on Sunday', async () => {
     jest.spyOn(Date.prototype, 'getUTCDay').mockReturnValue(0);
     jest.spyOn(Date.prototype, 'getUTCHours').mockReturnValue(10);
-    buildService().then(s => {
-      expect(s.isAllowedSession()).toBe(false);
-    });
+    const s = await buildService();
+    expect(await s.isAllowedSession()).toBe(false);
     jest.restoreAllMocks();
   });
 
@@ -141,7 +139,7 @@ describe('isAllowedSession', () => {
     jest.spyOn(Date.prototype, 'getUTCDay').mockReturnValue(1);   // Monday
     jest.spyOn(Date.prototype, 'getUTCHours').mockReturnValue(9); // 09:00
     const service = await buildService();
-    expect(service.isAllowedSession()).toBe(true);
+    expect(await service.isAllowedSession()).toBe(true);
     jest.restoreAllMocks();
   });
 
@@ -149,7 +147,7 @@ describe('isAllowedSession', () => {
     jest.spyOn(Date.prototype, 'getUTCDay').mockReturnValue(3);   // Wednesday
     jest.spyOn(Date.prototype, 'getUTCHours').mockReturnValue(3); // 03:00
     const service = await buildService();
-    expect(service.isAllowedSession()).toBe(false);
+    expect(await service.isAllowedSession()).toBe(false);
     jest.restoreAllMocks();
   });
 });

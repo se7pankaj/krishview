@@ -11,11 +11,16 @@
  */
 
 import { Global, Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { SymbolSpecService } from './symbol-spec.service';
+import { SymbolSpec } from './entities/symbol-spec.entity';
+import { Mt5Module } from '../mt5/mt5.module';
 
 @Global()
 @Module({
-  providers: [ActiveSymbolService],
-  exports:   [ActiveSymbolService],
+  imports:   [TypeOrmModule.forFeature([SymbolSpec]), Mt5Module],
+  providers: [ActiveSymbolService, SymbolSpecService],
+  exports:   [ActiveSymbolService, SymbolSpecService],
 })
 export class SymbolModule {}
