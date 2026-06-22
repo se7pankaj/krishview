@@ -73,16 +73,20 @@ export class RiskService {
       return true;
     }
 
-    const now  = new Date();
-    const gmtH = now.getUTCHours();
-    const day  = now.getUTCDay(); // 0=Sun, 6=Sat
+    const now    = new Date();
+    const gmtH   = now.getUTCHours();
+    const day    = now.getUTCDay(); // 0=Sun, 6=Sat
+    const sym    = this.activeSymbol.getSymbol();
+    const symCfg = this.activeSymbol.getConfig();
 
-    if (day === 0 || day === 6) {
+    // Forex/metals/indices/commodities close for the weekend. Crypto
+    // (category: 'crypto', e.g. BTCUSD) trades 24/7 and is exempt — mirrors
+    // the hard weekend gate in TradingService.isWeekendMarketClosed().
+    if (symCfg?.category !== 'crypto' && (day === 0 || day === 6)) {
       this.logger.log('Risk: Weekend — session closed');
       return false;
     }
 
-    const sym     = this.activeSymbol.getSymbol();
     const session = getActiveSession(sym, gmtH);
 
     if (!session) {

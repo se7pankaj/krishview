@@ -765,14 +765,16 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
         <div class="vl" id="smcDir">—</div>
       </div>
       <div class="sig-box">
-        <div class="lb">SMC Confidence</div>
+        <div class="lb">Raw SMC Score</div>
         <div class="vl gold" id="smcConf">—</div>
         <div class="conf-track"><div class="conf-fill" id="smcConfBar" style="width:0%;background:var(--gold)"></div></div>
+        <div class="sb" style="color:var(--muted2);font-size:10px">Pre-confluence — not the approval gate</div>
       </div>
       <div class="sig-box">
         <div class="lb">Tier Threshold</div>
         <div class="vl" id="smcTierThresh" style="color:var(--muted2)">≥ 74%</div>
         <div class="sb" id="smcTierLbl">Balanced mode</div>
+        <div class="sb" style="color:var(--muted2);font-size:10px">Applies to the confluence-adjusted score</div>
       </div>
     </div>
   </div>
@@ -1168,7 +1170,10 @@ async function refreshSmc() {
   $('smcConf').textContent = conf+'%';
   const bar = $('smcConfBar');
   bar.style.width      = conf+'%';
-  bar.style.background = conf>=74?'var(--green)':conf>=62?'var(--gold)':'var(--red)';
+  // Neutral colour — this is the raw pre-confluence SMC score, not the
+  // confluence-adjusted figure the tier threshold actually gates on, so it
+  // should never visually imply a pass/fail against that threshold.
+  bar.style.background = 'var(--gold)';
 }
 
 // ── Latest Analysis ───────────────────────────────────────────────────────────
@@ -1245,10 +1250,10 @@ function renderBreakdown(bd) {
     </div>`;
   }).join('');
   return `<div class="breakdown">
-    <div class="bd-title">Confidence Breakdown</div>
+    <div class="bd-title">Explainability Notes <span style="font-size:9px;color:var(--muted);font-weight:500;text-transform:none">(informational — not the approval score above)</span></div>
     ${rows}
     <div class="bd-total">
-      <span style="font-size:10px;color:var(--muted);font-weight:500">Total Score</span>
+      <span style="font-size:10px;color:var(--muted);font-weight:500">Explainability Subtotal</span>
       <span style="font-size:16px;font-weight:800;color:var(--gold);font-family:var(--font-num)">${bd.total??'—'}%</span>
     </div>
   </div>`;
