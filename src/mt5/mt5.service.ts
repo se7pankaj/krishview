@@ -294,9 +294,21 @@ export class Mt5Service {
 
   // ─── Closed deal PnL ─────────────────────────────────────────────────────
 
+  /**
+   * @param ticket  This is actually the POSITION id (placeOrder() returns
+   *                positionId as "ticket" — see TradeResult). MetaApi's
+   *                /history-deals/ticket/:ticket endpoint filters by an
+   *                individual DEAL ticket, which is a different number —
+   *                querying it with a position id returns an empty array
+   *                almost every time, which is why this used to silently
+   *                fall back to Exit=0/PnL=$0.00 after retries exhausted.
+   *                /history-deals/position/:positionId is the correct
+   *                endpoint — it returns every deal (entry + exit) tied to
+   *                that position.
+   */
   async getClosedDealPnL(ticket: number): Promise<ClosedDeal | null> {
     try {
-      const r     = await this.client.get(`${this.acctPath}/history-deals/ticket/${ticket}`);
+      const r     = await this.client.get(`${this.acctPath}/history-deals/position/${ticket}`);
       const deals: any[] = r.data ?? [];
 
       const closing = deals.find(d =>

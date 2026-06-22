@@ -274,7 +274,7 @@ export class ConfidenceExplainerService {
     };
 
     return (
-      `\n📊 <b>Confidence Breakdown</b>\n` +
+      `\n📋 <b>Explainability Notes</b> <i>(informational — not the approval score)</i>\n` +
       `<code>` +
       `${'─'.repeat(34)}\n` +
       `${fmt('Trend',     '📈', bd.trend)}\n` +
@@ -283,7 +283,7 @@ export class ConfidenceExplainerService {
       `${fmt('Liquidity', '💧', bd.liquidity)}\n` +
       `${fmt('News',      '📰', bd.news)}\n` +
       `${'─'.repeat(34)}\n` +
-      `  Total: ${bd.total}%` +
+      `  Explainability subtotal: ${bd.total}%` +
       `</code>`
     );
   }

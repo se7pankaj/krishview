@@ -75,6 +75,32 @@ export class TradingService implements OnApplicationBootstrap {
       : { active: false, name: 'None'  };
   }
 
+  /**
+   * True if the active symbol's underlying market is fundamentally closed
+   * for the weekend (forex/metals/indices/commodities all close). Crypto
+   * (category: 'crypto', e.g. BTCUSD) trades 24/7 and is exempt.
+   *
+   * This is a HARD block — unlike the killzone hour gate, it is never
+   * bypassed by forceRun, because no human approval can make a genuinely
+   * closed market accept an order. Without this, the bot would still send
+   * Telegram approval requests on Sat/Sun for symbols that simply cannot
+   * execute, and then immediately follow up with a MARKET_CLOSED error.
+   */
+  private isWeekendMarketClosed(): boolean {
+    const cfg = this.activeSymbol.getConfig();
+    if (cfg?.category === 'crypto') return false; // BTCUSD etc. trade 24/7
+
+    const now  = new Date();
+    const day  = now.getUTCDay();   // 0 = Sunday, 6 = Saturday
+    const hour = now.getUTCHours();
+
+    // Market closes Friday ~21:00 UTC, reopens Sunday ~21:00-22:00 UTC.
+    // Treat all of Saturday and Sunday-before-reopen as closed.
+    if (day === 6) return true;
+    if (day === 0 && hour < 21) return true;
+    return false;
+  }
+
   async onApplicationBootstrap(): Promise<void> {
     const alive = await this.mt5.ping();
     if (!alive) {
@@ -160,6 +186,12 @@ export class TradingService implements OnApplicationBootstrap {
    */
   async executeSMCCycle(hintDirection?: 'BUY' | 'SELL', forceRun = false): Promise<void> {
     this.logger.log(`════ SMC Cycle START — ${this.symbol} ════`);
+
+    // Weekend gate — hard block for non-crypto symbols, never bypassed.
+    if (this.isWeekendMarketClosed()) {
+      this.logger.log(`SMC Cycle SKIPPED — ${this.symbol} market closed for the weekend`);
+      return;
+    }
 
     // Killzone gate — only skip when automated timer fires outside session.
     // forceRun=true (manual trigger) bypasses this so the dashboard always works.
@@ -305,6 +337,8 @@ export class TradingService implements OnApplicationBootstrap {
       reasons,
       aiUsed: !!rec,
       breakdown,
+      tradingTier:   result.confluence?.tradingTier,
+      tierThreshold: result.confluence?.tierThreshold,
     });
 
     if (msgId) {

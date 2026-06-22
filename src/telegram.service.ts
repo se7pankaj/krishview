@@ -33,6 +33,10 @@ export interface ApprovalSignal {
   reasons:     string[];
   aiUsed:      boolean;
   breakdown?:  ConfidenceBreakdown;
+  /** The real gate that decided this trade (ConfluenceResult), shown
+   *  separately from the breakdown so the two are never confused. */
+  tradingTier?:   number;
+  tierThreshold?: number;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -137,10 +141,18 @@ export class TelegramService implements OnApplicationBootstrap {
     const reward   = Math.abs(signal.tp    - signal.entry).toFixed(2);
     const badge    = signal.aiUsed ? '🤖 AI' : '📊 SMC';
 
-    // Confidence breakdown block
+    // This is the REAL number that decided this trade reached approval —
+    // always shown, regardless of whether an explainability breakdown exists.
+    const tierLine = signal.tierThreshold
+      ? `Approval Score: <b>${signal.confidence}%</b>  (Tier ${signal.tradingTier ?? '?'} ≥ ${signal.tierThreshold}% required) ✅\n`
+      : `Approval Score: <b>${signal.confidence}%</b>\n`;
+
+    // Informational-only breakdown — uses a different scoring formula than
+    // the approval gate above, so it's explicitly labelled to avoid the two
+    // numbers being mistaken for each other.
     const breakdownBlock = signal.breakdown
       ? this.explainer.formatTelegram(signal.breakdown)
-      : `\nConfidence: <b>${signal.confidence}%</b>`;
+      : '';
 
     const text =
       `${dirEmoji} <b>Trade Approval Required</b> ${badge}\n\n` +
@@ -149,6 +161,7 @@ export class TelegramService implements OnApplicationBootstrap {
       `SL:     <code>${signal.sl}</code>  (-${risk} pts)\n` +
       `TP:     <code>${signal.tp}</code>  (+${reward} pts)\n` +
       `RR:     <b>1:${signal.rr}</b>\n` +
+      tierLine +
       breakdownBlock + '\n\n' +
       `<b>Key Reasons:</b>\n${signal.reasons.slice(0, 4).map(r => `  • ${r}`).join('\n')}\n\n` +
       `⏳ Expires in ${this.config.get('APPROVAL_TIMEOUT_MINUTES', '5')} min  |  ` +
