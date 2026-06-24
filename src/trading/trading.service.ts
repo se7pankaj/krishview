@@ -282,7 +282,7 @@ export class TradingService implements OnApplicationBootstrap {
     const result = await this.analysis.run(
       htfCandles, h4Candles, confirmCandles, setupCandles, entryCandles,
       this.symbol,
-      { minConfidence: mode.minConfidence, modeLabel: mode.label, macroCandles },
+      { minConfidence: mode.minConfidence, modeLabel: mode.label, macroCandles, modeConfig: mode },
     );
     if (!result) {
       this.logger.warn('[2/6] BLOCKED: analysis.run() returned null — SMC found no valid setup (check OB/FVG/zone logs above) or AI said WAIT');

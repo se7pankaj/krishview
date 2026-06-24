@@ -22,6 +22,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { Candle, SmcService, SMCSignal, StructureEvent } from '../smc/smc.service';
+import { ModeConfig } from '../config/app-config.service';
 
 // ─── Output Types ─────────────────────────────────────────────────────────────
 
@@ -88,7 +89,8 @@ export interface FeatureSet {
 
   // ── Killzone ───────────────────────────────────────────────────────────────
   inKillzone:   boolean;
-  killzoneName: 'London' | 'New York' | 'None';
+  /** Session label — adapts per trading mode (London/NY for Institutional, broader for scalp modes) */
+  killzoneName: string;
 
   momentum:  MomentumFeatures;
   fibonacci: FibonacciFeatures;
@@ -290,11 +292,38 @@ export class FeatureEngineService {
 
   // ─── Killzone Detection ───────────────────────────────────────────────────
 
-  detectKillzone(): { inKillzone: boolean; killzoneName: 'London' | 'New York' | 'None' } {
+  detectKillzone(mode?: ModeConfig): { inKillzone: boolean; killzoneName: string } {
     const utcHour = new Date().getUTCHours();
-    // London Open: 07:00–10:00 UTC
-    if (utcHour >= 7 && utcHour < 10)  return { inKillzone: true,  killzoneName: 'London'   };
-    // New York Open: 13:00–16:00 UTC
+    const day     = new Date().getUTCDay(); // 0=Sun, 6=Sat
+    const isWeekend = day === 0 || day === 6;
+
+    // ── Quick Scalp (H1 HTF) — all weekday hours, no session restriction ─────
+    if (mode?.htfTf === 'H1') {
+      if (isWeekend) return { inKillzone: false, killzoneName: 'Weekend' };
+      // Label by session for AI context, but always active on weekdays
+      if (utcHour >= 0  && utcHour < 7)  return { inKillzone: true, killzoneName: 'Asian session'       };
+      if (utcHour >= 7  && utcHour < 10) return { inKillzone: true, killzoneName: 'London open'          };
+      if (utcHour >= 10 && utcHour < 13) return { inKillzone: true, killzoneName: 'London mid-session'   };
+      if (utcHour >= 13 && utcHour < 16) return { inKillzone: true, killzoneName: 'London-NY overlap'    };
+      if (utcHour >= 16 && utcHour < 20) return { inKillzone: true, killzoneName: 'NY afternoon'         };
+      return { inKillzone: true,  killzoneName: 'Late NY / pre-Asian' };
+    }
+
+    // ── Precision Scalp (H4 HTF) — extended 06:00–20:00 UTC weekdays ─────────
+    if (mode?.htfTf === 'H4') {
+      if (isWeekend) return { inKillzone: false, killzoneName: 'Weekend' };
+      if (utcHour >= 6 && utcHour < 20) {
+        if (utcHour >= 7  && utcHour < 10) return { inKillzone: true, killzoneName: 'London open'        };
+        if (utcHour >= 13 && utcHour < 16) return { inKillzone: true, killzoneName: 'London-NY overlap'  };
+        if (utcHour >= 6  && utcHour < 7)  return { inKillzone: true, killzoneName: 'Pre-London'         };
+        if (utcHour >= 10 && utcHour < 13) return { inKillzone: true, killzoneName: 'London mid-session' };
+        return { inKillzone: true,  killzoneName: 'NY afternoon' };
+      }
+      return { inKillzone: false, killzoneName: 'Off-hours (outside 06–20 UTC)' };
+    }
+
+    // ── Institutional (D1 HTF) — strict London + NY killzones only ───────────
+    if (utcHour >= 7  && utcHour < 10) return { inKillzone: true,  killzoneName: 'London'   };
     if (utcHour >= 13 && utcHour < 16) return { inKillzone: true,  killzoneName: 'New York' };
     return { inKillzone: false, killzoneName: 'None' };
   }
@@ -325,6 +354,8 @@ export class FeatureEngineService {
      * When provided, macro bias and previous-day levels always use true D1 data.
      */
     macroCandles?: Candle[],
+    /** Active trading mode — used for mode-aware killzone detection passed to AI. */
+    modeConfig?: ModeConfig,
   ): FeatureSet {
     // Use real D1 as macro anchor when available (Precision / Quick Scalp modes).
     // Falls back to d1Candles when mode is Institutional (d1Candles IS D1 data).
@@ -382,7 +413,7 @@ export class FeatureEngineService {
     const fibonacci = this.computeFibonacci(m15Candles);
 
     // Killzone
-    const { inKillzone, killzoneName } = this.detectKillzone();
+    const { inKillzone, killzoneName } = this.detectKillzone(modeConfig);
 
     return {
       symbol,

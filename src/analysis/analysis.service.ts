@@ -14,6 +14,7 @@ import { FeatureEngineService, FeatureSet } from './feature-engine.service';
 import { AiReasoningService, AIRecommendation } from './ai-reasoning.service';
 import { SmcService, Candle, SMCSignal } from '../smc/smc.service';
 import { ConfluenceService, ConfluenceResult } from '../confluence/confluence.service';
+import { ModeConfig } from '../config/app-config.service';
 
 export interface AnalysisResult {
   analysisId:      number;
@@ -56,6 +57,11 @@ export class AnalysisService {
        * otherwise the EMA200 hard block runs on the wrong timeframe.
        */
       macroCandles?: Candle[];
+      /**
+       * Full mode config — passed to feature engine (killzone detection) and
+       * AI reasoning (system prompt, layer labels, RR/confidence thresholds).
+       */
+      modeConfig?: ModeConfig;
     },
   ): Promise<AnalysisResult | null> {
     const modeLabel = options?.modeLabel ?? 'Institutional';
@@ -72,7 +78,8 @@ export class AnalysisService {
     // 2. Feature engine — computes EMA, RSI, ATR, Fib, PDH/PDL, killzone, H4 OBs
     //    macroCandles (real D1) is passed when running in Precision/Quick Scalp mode
     //    so the EMA200 hard block and PDH/PDL levels always use true daily data.
-    const features = this.featureEngine.compute(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol, options?.macroCandles);
+    //    modeConfig is passed so killzone detection adapts to the active mode.
+    const features = this.featureEngine.compute(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol, options?.macroCandles, options?.modeConfig);
 
     // 3. 360° Confluence filter — EMA stack, RSI, Fibonacci, Volume
     //    Hard blocks fire here; adjustedConfidence forwarded to AI
@@ -125,7 +132,7 @@ export class AnalysisService {
     //    We catch it, log AI_ERROR status, and BLOCK the signal — no SMC-only fallback.
     let recommendation: AIRecommendation | null = null;
     try {
-      recommendation = await this.aiReasoning.analyze(features, adjustedSignal);
+      recommendation = await this.aiReasoning.analyze(features, adjustedSignal, options?.modeConfig);
     } catch (e: any) {
       const errMsg = e?.response?.data?.error?.message ?? e?.message ?? 'Unknown AI error';
       this.logger.error(
