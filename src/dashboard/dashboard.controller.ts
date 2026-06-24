@@ -5,7 +5,7 @@
  * Sprint 4.1 additions: /approvals, /news, /analytics
  */
 
-import { Controller, Get, Post, Param, Logger, Res } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Logger, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { JournalService } from '../journal/journal.service';
 import { Mt5Service } from '../mt5/mt5.service';
@@ -16,6 +16,7 @@ import { NewsService } from '../news/news.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { TradingService } from '../trading/trading.service';
 import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { AppConfigService, TRADING_MODES, TradingMode } from '../config/app-config.service';
 import { SYMBOL_LIST } from '../common/symbol-registry';
 
 // ─── Simple TTL cache to avoid MetaApi 429 rate-limit errors ─────────────────
@@ -46,6 +47,7 @@ export class DashboardController {
     private readonly analysis:      AnalysisService,
     private readonly trading:       TradingService,
     private readonly activeSymbol:  ActiveSymbolService,
+    private readonly appConfig:     AppConfigService,
   ) {}
 
   /** Active config — tier, AI flag, test bypasses */
@@ -590,5 +592,33 @@ export class DashboardController {
       sessions:    result.config?.sessions,
       spreadLimit: result.config?.spreadLimit,
     };
+  }
+
+  // ─── Trading Mode ─────────────────────────────────────────────────────────
+
+  /**
+   * GET /dashboard/trading-mode — returns the active mode + all mode definitions.
+   * Dashboard uses this to render the mode toggle on load.
+   */
+  @Get('trading-mode')
+  async getTradingMode() {
+    const mode   = await this.appConfig.getTradingMode();
+    const config = TRADING_MODES[mode];
+    return { mode, config, all: TRADING_MODES };
+  }
+
+  /**
+   * POST /dashboard/trading-mode — switch trading mode live (no restart needed).
+   * Body: { "mode": "INSTITUTIONAL" | "PRECISION" }
+   */
+  @Post('trading-mode')
+  async setTradingMode(@Body() body: { mode: string }) {
+    const mode = body?.mode as TradingMode;
+    if (!TRADING_MODES[mode]) {
+      return { ok: false, error: `Unknown mode "${mode}". Valid: INSTITUTIONAL, PRECISION` };
+    }
+    const config = await this.appConfig.setTradingMode(mode);
+    this.logger.log(`Dashboard: trading mode switched → ${mode}`);
+    return { ok: true, mode, config };
   }
 }

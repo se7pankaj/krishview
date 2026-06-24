@@ -39,19 +39,27 @@ export class AnalysisService {
   ) {}
 
   async run(
-    d1Candles:  Candle[],   // D1  — macro direction / bias
-    h4Candles:  Candle[],   // H4  — intermediate bias + primary OBs (money layer)
-    h1Candles:  Candle[],   // H1  — structural confirmation (BOS / CHoCH)
-    m15Candles: Candle[],   // M15 — setup refinement (OB / FVG within H4 zone)
-    m5Candles:  Candle[],   // M5  — entry timing (liquidity sweep trigger)
+    d1Candles:  Candle[],   // Layer 1 — macro bias (D1 in Institutional, H4 in Precision)
+    h4Candles:  Candle[],   // Layer 2 — money layer / OBs (H4 in Institutional, H1 in Precision)
+    h1Candles:  Candle[],   // Layer 3 — structural confirmation (H1 in Institutional, M15 in Precision)
+    m15Candles: Candle[],   // Layer 4 — setup refinement (M15 in Institutional, M5 in Precision)
+    m5Candles:  Candle[],   // Layer 5 — entry trigger (M5 in Institutional, M1 in Precision)
     symbol:     string,
+    options?: {
+      /** Override the tier threshold gate — used by Precision mode (T1 ≥62%) vs default T2 ≥74% */
+      minConfidence?: number;
+      /** Label shown in logs so it's clear which mode ran */
+      modeLabel?: string;
+    },
   ): Promise<AnalysisResult | null> {
-    // 1. SMC analysis — 5-layer: D1→H4→H1→M15→M5
+    const modeLabel = options?.modeLabel ?? 'Institutional';
+    // 1. SMC analysis — 5-layer top-down
     const smcSignal = this.smc.analyze(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles);
+    this.logger.log(`Analysis [${modeLabel}]: SMC signal = ${smcSignal?.direction ?? 'none'}`);
     this.logger.log(`Analysis: SMC signal = ${smcSignal?.direction ?? 'none'}`);
 
     if (!smcSignal) {
-      this.logger.log('Analysis: SMC returned null — skip');
+      this.logger.log(`Analysis [${modeLabel}]: SMC returned null — skip`);
       await this.logNoSignal(symbol, 'NO_SETUP', ['No valid SMC setup this cycle']);
       return null;
     }
@@ -75,14 +83,17 @@ export class AnalysisService {
     );
 
     // Step 6: Tier threshold gate — Tier 1 ≥62 | Tier 2 ≥74 | Tier 3 ≥86
-    if (confluenceResult.adjustedConfidence < confluenceResult.tierThreshold) {
+    // If the trading mode supplies a minConfidence override (e.g. Precision uses T1 ≥62%)
+    // that takes priority over the confluence service's own tier calculation.
+    const tierThreshold = options?.minConfidence ?? confluenceResult.tierThreshold;
+    if (confluenceResult.adjustedConfidence < tierThreshold) {
       this.logger.log(
-        `Analysis: Below Tier${confluenceResult.tradingTier} threshold ` +
-        `(${confluenceResult.adjustedConfidence}% < ${confluenceResult.tierThreshold}%) — skip`,
+        `Analysis [${modeLabel}]: Below threshold ` +
+        `(${confluenceResult.adjustedConfidence}% < ${tierThreshold}%) — skip`,
       );
       await this.logNoSignal(
         symbol, 'BELOW_TIER',
-        [`Adjusted ${confluenceResult.adjustedConfidence}% < Tier${confluenceResult.tradingTier} threshold ${confluenceResult.tierThreshold}%`],
+        [`Adjusted ${confluenceResult.adjustedConfidence}% < threshold ${tierThreshold}% (${modeLabel} mode)`],
         smcSignal.direction, confluenceResult.adjustedConfidence,
       );
       return null;

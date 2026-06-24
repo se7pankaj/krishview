@@ -13,8 +13,10 @@ import { Trade } from './journal/entities/trade.entity';
 import { Analysis } from './analysis/entities/analysis.entity';
 import { Approval } from './approval/entities/approval.entity';
 import { SymbolSpec } from './symbol/entities/symbol-spec.entity';
+import { AppConfig } from './config/entities/app-config.entity';
 
 // Feature modules
+import { AppConfigModule } from './config/app-config.module';
 import { SymbolModule } from './symbol/symbol.module';
 import { SignalsModule } from './signals/signals.module';
 import { SmcModule } from './smc/smc.module';
@@ -47,10 +49,13 @@ import { MlModule } from './ml/ml.module';
         username: config.get<string>('DB_USERNAME'),
         password: config.get<string>('DB_PASSWORD'),
         database: config.get<string>('DB_DATABASE'),
-        entities: [Signal, Trade, Analysis, Approval, SymbolSpec],
+        entities: [Signal, Trade, Analysis, Approval, SymbolSpec, AppConfig],
         synchronize: true, // auto-creates tables in dev; use migrations in prod
       }),
     }),
+
+    // App config — global key-value store, must come before trading modules
+    AppConfigModule,
 
     // Symbol registry — global singleton, must come before trading modules
     SymbolModule,

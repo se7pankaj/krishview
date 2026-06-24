@@ -48,7 +48,7 @@ export class NewsService {
     return parseInt(this.config.get('NEWS_BLOCK_BEFORE_MIN', '30'), 10);
   }
   private get blockAfter(): number {
-    return parseInt(this.config.get('NEWS_BLOCK_AFTER_MIN', '15'), 10);
+    return parseInt(this.config.get('NEWS_BLOCK_AFTER_MIN', '30'), 10);
   }
 
   // ─── Raw fetch & cache ─────────────────────────────────────────────────────
