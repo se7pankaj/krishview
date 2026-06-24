@@ -239,6 +239,7 @@ export class TradingService implements OnApplicationBootstrap {
     // 1. Candles — fetch 5 layers for the active trading mode.
     //    INSTITUTIONAL: D1 → H4 → H1 → M15 → M5
     //    PRECISION:     H4 → H1 → M15 → M5 → M1
+    //    QUICK_SCALP:   H1 → M30 → M15 → M5 → M1
     //    Sequential with 300ms gaps to avoid simultaneous MetaApi historyClient calls → 429
     const mode   = await this.appConfig.getActiveModeConfig();
     const tfDelay = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -253,6 +254,18 @@ export class TradingService implements OnApplicationBootstrap {
     const setupCandles   = await this.mt5.getCandles(mode.setupTf,   200, this.symbol);
     await tfDelay(300);
     const entryCandles   = await this.mt5.getCandles(mode.entryTf,   200, this.symbol);
+
+    // FIX — EMA200 macro anchor: in Precision / Quick Scalp the HTF layer is H4 or H1,
+    // so the D1 EMA200 hard block (in confluence.service.ts) would be computing the
+    // wrong EMA (33-day or 8-day instead of 200-day). Always fetch real D1 candles
+    // separately and pass as macroCandles so the EMA200 and PDH/PDL always use true
+    // daily data, regardless of which mode is active.
+    let macroCandles: any[] | undefined;
+    if (mode.htfTf !== 'D1') {
+      await tfDelay(300);
+      macroCandles = await this.mt5.getCandles('D1', 200, this.symbol);
+      this.logger.log(`[1/6] Macro anchor: D1 candles fetched (${macroCandles?.length ?? 0}) for EMA200 hard block`);
+    }
 
     this.logger.log(
       `[1/6] Candles: L1=${htfCandles?.length ?? 0} L2=${h4Candles?.length ?? 0} ` +
@@ -269,7 +282,7 @@ export class TradingService implements OnApplicationBootstrap {
     const result = await this.analysis.run(
       htfCandles, h4Candles, confirmCandles, setupCandles, entryCandles,
       this.symbol,
-      { minConfidence: mode.minConfidence, modeLabel: mode.label },
+      { minConfidence: mode.minConfidence, modeLabel: mode.label, macroCandles },
     );
     if (!result) {
       this.logger.warn('[2/6] BLOCKED: analysis.run() returned null — SMC found no valid setup (check OB/FVG/zone logs above) or AI said WAIT');

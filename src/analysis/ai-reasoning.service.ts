@@ -185,63 +185,62 @@ Provide your recommendation in this EXACT JSON format:
     smcSignal: SMCSignal | null,
   ): Promise<AIRecommendation | null> {
     if (!this.apiKey) {
-      this.logger.warn('ANTHROPIC_API_KEY not set — AI reasoning disabled');
-      return null;
+      // Explicit disabled state — caller decides whether to block or allow SMC fallback.
+      // We throw so analysis.service.ts can log AI_ERROR and block the signal.
+      throw new Error('ANTHROPIC_API_KEY not configured — AI analysis unavailable');
     }
 
     const prompt = this.buildPrompt(features, smcSignal);
-
     this.logger.log(`AI: Sending analysis to ${this.model}...`);
 
-    let raw: any;
-    try {
-      const resp = await axios.post(
-        'https://api.anthropic.com/v1/messages',
-        {
-          model:      this.model,
-          max_tokens: 1024,
-          system:     this.systemPrompt,
-          messages: [
-            { role: 'user', content: prompt },
-          ],
-          temperature: 0.2,
+    // NOTE: No try/catch here — any network error, timeout, credit exhaustion,
+    // or JSON parse failure throws and propagates to analysis.service.ts, which
+    // blocks the signal with AI_ERROR status. We never silently fall back to
+    // SMC-only when the AI layer is expected but unavailable.
+    const resp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      {
+        model:      this.model,
+        max_tokens: 1024,
+        system:     this.systemPrompt,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.2,
+      },
+      {
+        headers: {
+          'x-api-key':         this.apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type':      'application/json',
         },
-        {
-          headers: {
-            'x-api-key':         this.apiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type':      'application/json',
-          },
-          timeout: 30_000,
-        },
-      );
+        timeout: 30_000,
+      },
+    );
 
-      // Anthropic response: content[0].text
-      const content = resp.data.content?.[0]?.text ?? '';
-      // Claude may wrap JSON in markdown — strip it
-      const jsonStr = content.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
-      raw = JSON.parse(jsonStr);
+    // Anthropic response: content[0].text
+    const content = resp.data.content?.[0]?.text ?? '';
+    // Claude may wrap JSON in markdown — strip it
+    const jsonStr = content.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+    // JSON.parse throws on malformed response — propagates to caller as AI_ERROR
+    const raw = JSON.parse(jsonStr);
 
-      const usage = resp.data.usage ?? {};
-      this.logger.log(
-        `AI (Claude): ${raw.decision} | confidence=${raw.confidence} | ` +
-        `tokens=${usage.input_tokens}+${usage.output_tokens}`,
-      );
+    const usage = resp.data.usage ?? {};
+    this.logger.log(
+      `AI (Claude): ${raw.decision} | confidence=${raw.confidence} | ` +
+      `tokens=${usage.input_tokens}+${usage.output_tokens}`,
+    );
 
-      // Validate
-      const validated = this.validate(raw, features.price);
-      if (!validated) return null;
+    // validate() returns null when AI's own decision fails quality checks
+    // (confidence too low, SL wrong side, RR < 2:1, missing fields).
+    // null here is a deliberate "no trade" outcome — not an error.
+    const validated = this.validate(raw, features.price);
+    if (!validated) return null;
 
-      return {
-        ...validated,
-        model:            this.model,
-        promptTokens:     usage.input_tokens  ?? 0,
-        completionTokens: usage.output_tokens ?? 0,
-      };
-    } catch (e: any) {
-      this.logger.error(`AI call failed: ${e?.response?.data?.error?.message ?? e.message}`);
-      return null;
-    }
+    return {
+      ...validated,
+      model:            this.model,
+      promptTokens:     usage.input_tokens  ?? 0,
+      completionTokens: usage.output_tokens ?? 0,
+    };
   }
 
   // ─── Response validation ──────────────────────────────────────────────────

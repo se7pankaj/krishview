@@ -753,7 +753,7 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
   <div class="card">
     <div class="smc-grid">
       <div class="smc-layer d1">
-        <div class="smc-tf">D1 — Direction <span class="smc-badge">Macro Bias</span></div>
+        <div class="smc-tf" id="smcTfL1">D1 — Direction <span class="smc-badge">Macro Bias</span></div>
         <div class="smc-val neu" id="smcD1Bias">—</div>
         <div class="smc-rows">
           <div class="smc-row"><span>EMA200</span><b id="smcD1Ema">—</b></div>
@@ -761,7 +761,7 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
       </div>
       <div class="smc-layer h4">
-        <div class="smc-tf">H4 — Money Layer <span class="smc-badge">Primary OBs</span></div>
+        <div class="smc-tf" id="smcTfL2">H4 — Money Layer <span class="smc-badge">Primary OBs</span></div>
         <div class="smc-val" id="smcH4Zone">—</div>
         <div class="smc-rows">
           <div class="smc-row"><span>Zone %</span><b id="smcH4Pct">—</b></div>
@@ -769,7 +769,7 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
       </div>
       <div class="smc-layer h1">
-        <div class="smc-tf">H1 — Structure <span class="smc-badge">BOS / CHoCH</span></div>
+        <div class="smc-tf" id="smcTfL3">H1 — Structure <span class="smc-badge">BOS / CHoCH</span></div>
         <div class="smc-val" id="smcH1Struct">—</div>
         <div class="smc-rows">
           <div class="smc-row"><span>BOS</span><b id="smcH1Bos">—</b></div>
@@ -777,7 +777,7 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
       </div>
       <div class="smc-layer m15">
-        <div class="smc-tf">M15 — Setup <span class="smc-badge">OB / FVG</span></div>
+        <div class="smc-tf" id="smcTfL4">M15 — Setup <span class="smc-badge">OB / FVG</span></div>
         <div class="smc-val" id="smcM15Zone">—</div>
         <div class="smc-rows">
           <div class="smc-row"><span>OBs</span><b id="smcM15Obs">—</b></div>
@@ -785,7 +785,7 @@ tbody tr:hover td { background: rgba(255,255,255,0.02); }
         </div>
       </div>
       <div class="smc-layer m5">
-        <div class="smc-tf">M5 — Entry <span class="smc-badge">Trigger</span></div>
+        <div class="smc-tf" id="smcTfL5">M5 — Entry <span class="smc-badge">Trigger</span></div>
         <div class="smc-val" id="smcM5Dir">—</div>
         <div class="smc-rows">
           <div class="smc-row"><span>Sweeps</span><b id="smcM5Sweeps">—</b></div>
@@ -1497,23 +1497,61 @@ async function loadTradingMode() {
   } catch(e) { console.warn('Could not load trading mode', e); }
 }
 
+// Layer role labels — same meaning regardless of which TF fills each slot
+const LAYER_ROLES = [
+  { role: 'Direction',    badge: 'Macro Bias'   },
+  { role: 'Money Layer',  badge: 'Primary OBs'  },
+  { role: 'Structure',    badge: 'BOS / CHoCH'  },
+  { role: 'Setup',        badge: 'OB / FVG'     },
+  { role: 'Entry',        badge: 'Trigger'      },
+];
+
+// Tier display per mode
+const MODE_TIER = {
+  INSTITUTIONAL: { cls: 'tier-2', text: 'T2 · Balanced · ≥74%',    thresh: '≥ 74%', lbl: 'Balanced mode'    },
+  PRECISION:     { cls: 'tier-1', text: 'T1 · Aggressive · ≥62%',   thresh: '≥ 62%', lbl: 'Precision mode'   },
+  QUICK_SCALP:   { cls: 'tier-1', text: 'Scalp · ≥58%',             thresh: '≥ 58%', lbl: 'Quick Scalp mode' },
+};
+
 function applyModeUI(mode, config) {
+  // ── Mode button ─────────────────────────────────────────────────────────────
   const btn   = $('modeBtn');
   const label = $('modeBtnLabel');
-  if (!btn || !label) return;
-  if (mode === 'QUICK_SCALP') {
-    btn.className     = 'btn btn-mode quick';
-    label.textContent = `⚡⚡ ${config?.label ?? 'Quick Scalp'}`;
-    btn.title         = config?.description ?? 'Quick Scalp mode active';
-  } else if (mode === 'PRECISION') {
-    btn.className     = 'btn btn-mode precision';
-    label.textContent = `⚡ ${config?.label ?? 'Precision'}`;
-    btn.title         = config?.description ?? 'Precision Scalp mode active';
-  } else {
-    btn.className     = 'btn btn-mode';
-    label.textContent = `🏛 ${config?.label ?? 'Institutional'}`;
-    btn.title         = config?.description ?? 'Institutional mode active';
+  if (btn && label) {
+    if (mode === 'QUICK_SCALP') {
+      btn.className     = 'btn btn-mode quick';
+      label.textContent = `⚡⚡ ${config?.label ?? 'Quick Scalp'}`;
+      btn.title         = config?.description ?? 'Quick Scalp mode active';
+    } else if (mode === 'PRECISION') {
+      btn.className     = 'btn btn-mode precision';
+      label.textContent = `⚡ ${config?.label ?? 'Precision'}`;
+      btn.title         = config?.description ?? 'Precision Scalp mode active';
+    } else {
+      btn.className     = 'btn btn-mode';
+      label.textContent = `🏛 ${config?.label ?? 'Institutional'}`;
+      btn.title         = config?.description ?? 'Institutional mode active';
+    }
   }
+
+  // ── 5-layer timeframe headers ────────────────────────────────────────────────
+  const tfs = config
+    ? [config.htfTf, config.h4Tf, config.confirmTf, config.setupTf, config.entryTf]
+    : ['D1', 'H4', 'H1', 'M15', 'M5'];
+  tfs.forEach((tf, i) => {
+    const el = $(`smcTfL${i + 1}`);
+    if (!el) return;
+    const { role, badge } = LAYER_ROLES[i];
+    el.innerHTML = `${tf} — ${role} <span class="smc-badge">${badge}</span>`;
+  });
+
+  // ── Tier badge + threshold display ───────────────────────────────────────────
+  const tier = MODE_TIER[mode] ?? MODE_TIER.INSTITUTIONAL;
+  const tb = $('tierBadge');
+  if (tb) { tb.className = `tier-badge ${tier.cls}`; tb.textContent = tier.text; }
+  const tt = $('smcTierThresh');
+  if (tt) tt.textContent = tier.thresh;
+  const tl = $('smcTierLbl');
+  if (tl) tl.textContent = tier.lbl;
 }
 
 const MODE_CYCLE = ['INSTITUTIONAL', 'PRECISION', 'QUICK_SCALP'];

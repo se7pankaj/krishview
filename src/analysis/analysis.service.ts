@@ -50,13 +50,18 @@ export class AnalysisService {
       minConfidence?: number;
       /** Label shown in logs so it's clear which mode ran */
       modeLabel?: string;
+      /**
+       * Real D1 candles for EMA200 macro anchor.
+       * Must be provided when mode HTF is NOT D1 (Precision / Quick Scalp),
+       * otherwise the EMA200 hard block runs on the wrong timeframe.
+       */
+      macroCandles?: Candle[];
     },
   ): Promise<AnalysisResult | null> {
     const modeLabel = options?.modeLabel ?? 'Institutional';
     // 1. SMC analysis — 5-layer top-down
     const smcSignal = this.smc.analyze(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles);
     this.logger.log(`Analysis [${modeLabel}]: SMC signal = ${smcSignal?.direction ?? 'none'}`);
-    this.logger.log(`Analysis: SMC signal = ${smcSignal?.direction ?? 'none'}`);
 
     if (!smcSignal) {
       this.logger.log(`Analysis [${modeLabel}]: SMC returned null — skip`);
@@ -65,7 +70,9 @@ export class AnalysisService {
     }
 
     // 2. Feature engine — computes EMA, RSI, ATR, Fib, PDH/PDL, killzone, H4 OBs
-    const features = this.featureEngine.compute(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol);
+    //    macroCandles (real D1) is passed when running in Precision/Quick Scalp mode
+    //    so the EMA200 hard block and PDH/PDL levels always use true daily data.
+    const features = this.featureEngine.compute(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol, options?.macroCandles);
 
     // 3. 360° Confluence filter — EMA stack, RSI, Fibonacci, Volume
     //    Hard blocks fire here; adjustedConfidence forwarded to AI
@@ -114,18 +121,35 @@ export class AnalysisService {
     };
 
     // 4. AI reasoning — receives all 5-layer data + confluence context
-    const recommendation = await this.aiReasoning.analyze(features, adjustedSignal);
+    //    SAFETY: any API failure, timeout, credit exhaustion, or parse error throws here.
+    //    We catch it, log AI_ERROR status, and BLOCK the signal — no SMC-only fallback.
+    let recommendation: AIRecommendation | null = null;
+    try {
+      recommendation = await this.aiReasoning.analyze(features, adjustedSignal);
+    } catch (e: any) {
+      const errMsg = e?.response?.data?.error?.message ?? e?.message ?? 'Unknown AI error';
+      this.logger.error(
+        `Analysis [${modeLabel}]: AI API failure — "${errMsg}" — signal BLOCKED for safety`,
+      );
+      await this.logNoSignal(
+        symbol, 'AI_ERROR',
+        [`AI analysis failed: ${errMsg}. Signal blocked — will retry next cycle.`],
+        adjustedSignal.direction, adjustedSignal.confidence,
+      );
+      return null;  // Never proceed with a signal when AI layer fails
+    }
 
-    // 5. Decide if we have something worth showing
-    const hasSignal = recommendation
-      ? recommendation.decision !== 'WAIT'
-      : true; // SMC + confluence passed → always actionable even without AI
+    // 5. Decide if we have something worth showing.
+    //    recommendation = null means AI made a deliberate low-confidence / validation decision → no signal.
+    //    recommendation.decision === 'WAIT' → AI explicitly said wait.
+    //    SAFETY: fallback is false — we never generate a signal without a clean AI recommendation.
+    const hasSignal = recommendation !== null && recommendation.decision !== 'WAIT';
 
     if (!hasSignal) {
-      this.logger.log('Analysis: AI said WAIT — skip');
+      this.logger.log('Analysis: AI said WAIT (or low confidence) — skip');
       await this.logNoSignal(
         symbol, 'WAIT',
-        recommendation?.reasons ?? ['AI reviewed full context and said WAIT'],
+        recommendation?.reasons ?? ['AI reviewed full context and said WAIT or confidence too low'],
         adjustedSignal.direction, recommendation?.confidence ?? adjustedSignal.confidence,
       );
       return null;
@@ -179,7 +203,7 @@ export class AnalysisService {
    */
   private async logNoSignal(
     symbol: string,
-    status: 'NO_SETUP' | 'BLOCKED' | 'BELOW_TIER' | 'WAIT',
+    status: 'NO_SETUP' | 'BLOCKED' | 'BELOW_TIER' | 'WAIT' | 'AI_ERROR',
     reasons: string[],
     direction?: string,
     confidence?: number,
