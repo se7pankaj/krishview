@@ -606,22 +606,59 @@ export class DashboardController {
   /**
    * POST /dashboard/set-symbol/:symbol — switch active trading symbol.
    * Takes effect on the NEXT analysis cycle (within 5 minutes).
+   * Returns mode-aware inSession + activeSessions so the frontend session card
+   * updates correctly for Quick Scalp (all weekday hours) and Precision (06-20 UTC).
    */
   @Post('set-symbol/:symbol')
-  setSymbol(@Param('symbol') symbol: string) {
+  async setSymbol(@Param('symbol') symbol: string) {
     const result = this.activeSymbol.setSymbol(symbol);
     if (!result.ok) {
       this.logger.warn(`Dashboard: invalid symbol "${symbol}" — ${result.error}`);
       return { ok: false, error: result.error };
     }
     this.logger.log(`Dashboard: symbol switched → ${symbol} (${result.config?.label})`);
+
+    // Mode-aware session detection — same logic as getActiveSymbol()
+    const mode       = await this.appConfig.getActiveModeConfig();
+    const cfg        = result.config;
+    const utcH       = new Date().getUTCHours();
+    const utcDay     = new Date().getUTCDay();
+    const isWeekend  = utcDay === 0 || utcDay === 6;
+
+    let inSession: boolean;
+    let activeSessions: string[];
+
+    if (mode.htfTf === 'H1') {
+      inSession      = !isWeekend;
+      activeSessions = inSession ? ['All-day scalp'] : [];
+    } else if (mode.extendedHours) {
+      inSession      = !isWeekend && utcH >= 6 && utcH < 20;
+      activeSessions = inSession ? ['Extended (06–20 UTC)'] : [];
+    } else {
+      inSession = cfg?.sessions.some(s => {
+        if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
+        return utcH >= s.startUtc && utcH < s.endUtc;
+      }) ?? false;
+      activeSessions = cfg?.sessions
+        .filter(s => {
+          if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
+          return utcH >= s.startUtc && utcH < s.endUtc;
+        })
+        .map(s => s.name) ?? [];
+    }
+
     return {
-      ok:          true,
+      ok:             true,
       symbol,
-      label:       result.config?.label,
-      emoji:       result.config?.emoji,
-      sessions:    result.config?.sessions,
-      spreadLimit: result.config?.spreadLimit,
+      label:          cfg?.label,
+      emoji:          cfg?.emoji,
+      sessions:       cfg?.sessions,
+      spreadLimit:    cfg?.spreadLimit,
+      inSession,
+      activeSessions,
+      utcHour:        utcH,
+      uaeHour:        (utcH + 4) % 24,
+      activeMode:     mode.label,
     };
   }
 
