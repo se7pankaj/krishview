@@ -1610,6 +1610,12 @@ async function toggleTradingMode() {
       _currentMode = d.mode;
       applyModeUI(d.mode, d.config);
       showToast(`Switched to ${d.config?.label} mode`);
+      // Immediately refresh all mode-sensitive panels — don't wait for the 60s slow() tick.
+      // refreshSmc() re-runs 5-layer analysis with the new mode's timeframes.
+      // refreshAnalysis() updates the AI card. refreshConfig() fixes the session card.
+      refreshSmc();
+      refreshAnalysis();
+      refreshConfig();
     } else {
       showToast(`Failed: ${d.error}`, true);
     }
