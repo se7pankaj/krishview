@@ -377,10 +377,17 @@ export class SmcService {
     const h4Structs = this.detectStructure(h4Candles, htfBias);
     const h4OBs     = this.detectOrderBlocks(h4Candles);
     const h4FVGs    = this.detectFVGs(h4Candles);
-    const h4Pd      = this.premiumDiscount(h4Candles);
     const h4ATR     = this.atr(h4Candles);
 
-    this.logger.log(`SMC | H4 Zone: ${h4Pd.zone} (${h4Pd.pct}%) | H4 OBs: ${h4OBs.length} | H4 FVGs: ${h4FVGs.length}`);
+    // Zone calculation uses the LAST 40 candles only (not all 200).
+    // Using 200 candles in a trending market sets swingHigh to weeks-old extremes —
+    // in a 4-day downtrend, price is always at 5-10% of the 200-candle range = "deep
+    // discount forever" and the SHORT gate never opens. 40 candles ≈ 20h on M30,
+    // 2 days on H1, 7 days on H4 — captures recent swing structure appropriately.
+    const ZONE_LOOKBACK = 40;
+    const h4Pd = this.premiumDiscount(h4Candles.slice(-ZONE_LOOKBACK));
+
+    this.logger.log(`SMC | H4 Zone: ${h4Pd.zone} (${h4Pd.pct}%) swH=${h4Pd.swingHigh.toFixed(2)} swL=${h4Pd.swingLow.toFixed(2)} | H4 OBs: ${h4OBs.length} | H4 FVGs: ${h4FVGs.length}`);
 
     // ── Layer 3: H1 structural confirmation ─────────────────────────────────
     const h1Structs     = this.detectStructure(h1Candles, htfBias);
@@ -390,7 +397,7 @@ export class SmcService {
     // ── Layer 4: M15 setup refinement ───────────────────────────────────────
     const m15OBs  = this.detectOrderBlocks(m15Candles);
     const m15FVGs = this.detectFVGs(m15Candles);
-    const m15Pd   = this.premiumDiscount(m15Candles);
+    const m15Pd   = this.premiumDiscount(m15Candles.slice(-ZONE_LOOKBACK));
 
     // ── Layer 5: M5 trigger ─────────────────────────────────────────────────
     const m5Sweeps = this.detectLiquiditySweeps(m5Candles);
@@ -401,19 +408,24 @@ export class SmcService {
     // LONG SETUP
     // ════════════════════════════════════════════════════════════════════════
     if (htfBias === 'BULLISH') {
-      // Zone gate: H4 discount zone is where longs live
-      if (h4Pd.zone !== 'discount' && !this.skipZoneCheck) {
-        this.logger.log(`SMC LONG skip: H4 in ${h4Pd.zone} (need discount)`);
+      // Zone gate: H4 discount OR equilibrium zone is valid for longs.
+      // "Equilibrium" (45-55% of recent range) is also a valid SMC entry — price
+      // at fair value with bullish bias still has positive expectancy.
+      if (h4Pd.zone === 'premium' && !this.skipZoneCheck) {
+        this.logger.log(`SMC LONG skip: H4 in premium (need discount or equilibrium)`);
         return null;
       }
 
       let confidence = 20;
       const reasons: string[] = [`D1 BULLISH Bias`];
 
-      // H4 discount zone bonus
+      // H4 zone bonus — full bonus for discount (ideal BUY zone), half for equilibrium
       if (h4Pd.zone === 'discount') {
         reasons.push(`H4 Discount Zone (${h4Pd.pct}%)`);
         confidence += 10;
+      } else if (h4Pd.zone === 'equilibrium') {
+        reasons.push(`H4 Equilibrium (${h4Pd.pct}%) — fair value BUY`);
+        confidence += 5;
       }
 
       // H4 OB touch — HIGHEST WEIGHT (institutional level)
@@ -507,17 +519,24 @@ export class SmcService {
     // SHORT SETUP
     // ════════════════════════════════════════════════════════════════════════
     if (htfBias === 'BEARISH') {
-      if (h4Pd.zone !== 'premium' && !this.skipZoneCheck) {
-        this.logger.log(`SMC SHORT skip: H4 in ${h4Pd.zone} (need premium)`);
+      // Zone gate: H4 premium OR equilibrium zone is valid for shorts.
+      // Strict "premium only" blocks all signals in trending markets — price never
+      // reaches the old swing high that defined "premium" on 200 candles.
+      if (h4Pd.zone === 'discount' && !this.skipZoneCheck) {
+        this.logger.log(`SMC SHORT skip: H4 in discount (need premium or equilibrium)`);
         return null;
       }
 
       let confidence = 20;
       const reasons: string[] = [`D1 BEARISH Bias`];
 
+      // H4 zone bonus — full bonus for premium (ideal SELL zone), half for equilibrium
       if (h4Pd.zone === 'premium') {
         reasons.push(`H4 Premium Zone (${h4Pd.pct}%)`);
         confidence += 10;
+      } else if (h4Pd.zone === 'equilibrium') {
+        reasons.push(`H4 Equilibrium (${h4Pd.pct}%) — fair value SELL`);
+        confidence += 5;
       }
 
       const h4Ob = [...h4OBs].reverse().find(o =>

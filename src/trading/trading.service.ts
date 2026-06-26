@@ -18,6 +18,8 @@ import { MlService } from '../ml/ml.service';
 import { ConfidenceExplainerService } from '../analysis/confidence-explainer.service';
 import { NewsService } from '../news/news.service';
 import { ActiveSymbolService } from './active-symbol.service';
+import { SymbolSpecService } from '../symbol/symbol-spec.service';
+import { AppConfigService } from '../config/app-config.service';
 import { getActiveSession } from '../common/symbol-registry';
 
 @Injectable()
@@ -27,11 +29,6 @@ export class TradingService implements OnApplicationBootstrap {
   // ── Dynamic getter — reads from SymbolModule at call time, never cached ──
   private get symbol(): string { return this.activeSymbol.getSymbol(); }
 
-  private readonly htfTf:     string;
-  private readonly h4Tf:      string;
-  private readonly confirmTf: string;
-  private readonly setupTf:   string;
-  private readonly entryTf:   string;
   private readonly skipKillzoneCheck: boolean;
   private lastDailyReport = -1;
 
@@ -52,22 +49,37 @@ export class TradingService implements OnApplicationBootstrap {
     private readonly explainer:    ConfidenceExplainerService,
     private readonly news:         NewsService,
     private readonly activeSymbol: ActiveSymbolService,
+    private readonly symbolSpec:   SymbolSpecService,
+    private readonly appConfig:    AppConfigService,
   ) {
-    this.htfTf     = this.config.get<string>('HTF_TF',     'D1');
-    this.h4Tf      = this.config.get<string>('H4_TF',      'H4');
-    this.confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
-    this.setupTf   = this.config.get<string>('SETUP_TF',   'M15');
-    this.entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
     this.skipKillzoneCheck = this.config.get<string>('SKIP_KILLZONE_CHECK', 'false') === 'true';
   }
 
   /**
    * Returns true if now is inside any active session for the current symbol.
-   * Sessions are read from SymbolRegistry — switching the symbol automatically
-   * changes which hours count as a killzone, no env vars needed.
+   *
+   * - INSTITUTIONAL: uses the strict London+NY killzone windows from SymbolRegistry
+   * - PRECISION: extended hours 06:00–20:00 UTC on any weekday (broader intraday window
+   *   that captures European open, US open, and mid-session setups)
    */
-  private inKillzone(): { active: boolean; name: string } {
-    const h       = new Date().getUTCHours();
+  private async inKillzone(): Promise<{ active: boolean; name: string }> {
+    const h   = new Date().getUTCHours();
+    const day = new Date().getUTCDay(); // 0=Sun, 6=Sat
+    const mode = await this.appConfig.getActiveModeConfig();
+
+    if (mode.extendedHours) {
+      // Weekends always blocked (non-crypto markets closed regardless of mode)
+      if (day === 0 || day === 6) return { active: false, name: 'None' };
+
+      // Quick Scalp — all weekday hours (00:00–23:59 UTC), catches Asian + European + US
+      if (mode.htfTf === 'H1') return { active: true, name: 'All-day scalp' };
+
+      // Precision Scalp — extended window: Mon–Fri 06:00–20:00 UTC
+      if (h >= 6 && h < 20) return { active: true, name: 'Extended (06–20 UTC)' };
+      return { active: false, name: 'None' };
+    }
+
+    // Institutional — strict London + NY killzones from SymbolRegistry
     const sym     = this.activeSymbol.getSymbol();
     const session = getActiveSession(sym, h);
     return session
@@ -188,16 +200,32 @@ export class TradingService implements OnApplicationBootstrap {
     this.logger.log(`════ SMC Cycle START — ${this.symbol} ════`);
 
     // Weekend gate — hard block for non-crypto symbols, never bypassed.
+    // Cheap, zero-dependency heuristic — always available even if MetaApi
+    // is unreachable, so this stays as the first line of defense.
     if (this.isWeekendMarketClosed()) {
       this.logger.log(`SMC Cycle SKIPPED — ${this.symbol} market closed for the weekend`);
       return;
     }
 
+    // Broker-verified market-open check — catches what the heuristic above
+    // can't: holidays, maintenance windows, and whether THIS broker really
+    // keeps crypto open on weekends (settles that with real data instead of
+    // assuming). Fails open (returns true) if unreachable/uncached, so it
+    // layers on top of the hardcoded gate rather than replacing it.
+    if (!(await this.symbolSpec.isMarketOpen(this.symbol))) {
+      this.logger.log(`SMC Cycle SKIPPED — ${this.symbol} market closed per broker's real trading schedule`);
+      return;
+    }
+
     // Killzone gate — only skip when automated timer fires outside session.
     // forceRun=true (manual trigger) bypasses this so the dashboard always works.
-    const kz = this.inKillzone();
+    const kz = await this.inKillzone();
     if (!kz.active && !this.skipKillzoneCheck && !forceRun) {
-      this.logger.log(`SMC Cycle SKIPPED — outside killzone (UTC hour: ${new Date().getUTCHours()}). Next: London 07:00 or NY 13:00`);
+      const mode = await this.appConfig.getActiveModeConfig();
+      const hint = mode.extendedHours
+        ? 'Extended mode: waiting for 06:00 UTC'
+        : `Next: London 07:00 or NY 13:00`;
+      this.logger.log(`SMC Cycle SKIPPED — outside killzone (UTC hour: ${new Date().getUTCHours()}). ${hint}`);
       return;
     }
     if (kz.active) {
@@ -208,22 +236,40 @@ export class TradingService implements OnApplicationBootstrap {
       this.logger.log(`⚠️ Killzone check bypassed (SKIP_KILLZONE_CHECK=true) — running outside session`);
     }
 
-    // 1. Candles — 5-layer top-down: D1 → H4 → H1 → M15 → M5
-    // Sequential with 600ms gaps to avoid 5 simultaneous MetaApi historyClient calls → 429
+    // 1. Candles — fetch 5 layers for the active trading mode.
+    //    INSTITUTIONAL: D1 → H4 → H1 → M15 → M5
+    //    PRECISION:     H4 → H1 → M15 → M5 → M1
+    //    QUICK_SCALP:   H1 → M30 → M15 → M5 → M1
+    //    Sequential with 300ms gaps to avoid simultaneous MetaApi historyClient calls → 429
+    const mode   = await this.appConfig.getActiveModeConfig();
     const tfDelay = (ms: number) => new Promise(r => setTimeout(r, ms));
-    const htfCandles     = await this.mt5.getCandles(this.htfTf,     200, this.symbol);
+    this.logger.log(`[1/6] Mode: ${mode.label} (${mode.htfTf}→${mode.h4Tf}→${mode.confirmTf}→${mode.setupTf}→${mode.entryTf})`);
+
+    const htfCandles     = await this.mt5.getCandles(mode.htfTf,     200, this.symbol);
     await tfDelay(300);
-    const h4Candles      = await this.mt5.getCandles(this.h4Tf,      200, this.symbol);
+    const h4Candles      = await this.mt5.getCandles(mode.h4Tf,      200, this.symbol);
     await tfDelay(300);
-    const confirmCandles = await this.mt5.getCandles(this.confirmTf, 200, this.symbol);
+    const confirmCandles = await this.mt5.getCandles(mode.confirmTf, 200, this.symbol);
     await tfDelay(300);
-    const setupCandles   = await this.mt5.getCandles(this.setupTf,   200, this.symbol);
+    const setupCandles   = await this.mt5.getCandles(mode.setupTf,   200, this.symbol);
     await tfDelay(300);
-    const entryCandles   = await this.mt5.getCandles(this.entryTf,   200, this.symbol);
+    const entryCandles   = await this.mt5.getCandles(mode.entryTf,   200, this.symbol);
+
+    // FIX — EMA200 macro anchor: in Precision / Quick Scalp the HTF layer is H4 or H1,
+    // so the D1 EMA200 hard block (in confluence.service.ts) would be computing the
+    // wrong EMA (33-day or 8-day instead of 200-day). Always fetch real D1 candles
+    // separately and pass as macroCandles so the EMA200 and PDH/PDL always use true
+    // daily data, regardless of which mode is active.
+    let macroCandles: any[] | undefined;
+    if (mode.htfTf !== 'D1') {
+      await tfDelay(300);
+      macroCandles = await this.mt5.getCandles('D1', 200, this.symbol);
+      this.logger.log(`[1/6] Macro anchor: D1 candles fetched (${macroCandles?.length ?? 0}) for EMA200 hard block`);
+    }
 
     this.logger.log(
-      `[1/6] Candles: D1=${htfCandles?.length ?? 0} H4=${h4Candles?.length ?? 0} ` +
-      `H1=${confirmCandles?.length ?? 0} M15=${setupCandles?.length ?? 0} M5=${entryCandles?.length ?? 0}`,
+      `[1/6] Candles: L1=${htfCandles?.length ?? 0} L2=${h4Candles?.length ?? 0} ` +
+      `L3=${confirmCandles?.length ?? 0} L4=${setupCandles?.length ?? 0} L5=${entryCandles?.length ?? 0}`,
     );
 
     if (!htfCandles?.length || !h4Candles?.length || !confirmCandles?.length || !setupCandles?.length || !entryCandles?.length) {
@@ -232,8 +278,12 @@ export class TradingService implements OnApplicationBootstrap {
     }
 
     // 2. Full analysis (5-layer SMC + FeatureEngine + AI)
-    this.logger.log('[2/6] Running 5-layer analysis (D1→H4→H1→M15→M5 → FeatureEngine → AI)…');
-    const result = await this.analysis.run(htfCandles, h4Candles, confirmCandles, setupCandles, entryCandles, this.symbol);
+    this.logger.log(`[2/6] Running 5-layer analysis (${mode.htfTf}→${mode.h4Tf}→${mode.confirmTf}→${mode.setupTf}→${mode.entryTf} → FeatureEngine → AI)…`);
+    const result = await this.analysis.run(
+      htfCandles, h4Candles, confirmCandles, setupCandles, entryCandles,
+      this.symbol,
+      { minConfidence: mode.minConfidence, modeLabel: mode.label, macroCandles, modeConfig: mode },
+    );
     if (!result) {
       this.logger.warn('[2/6] BLOCKED: analysis.run() returned null — SMC found no valid setup (check OB/FVG/zone logs above) or AI said WAIT');
       return;
@@ -362,7 +412,7 @@ export class TradingService implements OnApplicationBootstrap {
     this.logger.log('[6/6] APPROVED — placing order in MT5…');
     await this.analysis.updateStatus(result.analysisId, 'APPROVED');
 
-    const lots = this.risk.calcLotSize(account.balance, entry, sl);
+    const lots = await this.risk.calcLotSize(account.balance, entry, sl);
     let orderResult: { ticket: number; price: number };
 
     try {

@@ -81,6 +81,32 @@ export interface ClosedDeal {
   exitTime:  string;
 }
 
+export interface DaySession { from: string; to: string }
+export type WeekSessions = Record<
+  'SUNDAY' | 'MONDAY' | 'TUESDAY' | 'WEDNESDAY' | 'THURSDAY' | 'FRIDAY' | 'SATURDAY',
+  DaySession[]
+>;
+
+export interface SymbolSpecification {
+  symbol:        string;
+  minVolume:     number;
+  maxVolume:     number;
+  volumeStep:    number;
+  digits:        number;
+  contractSize:  number;
+  /** Broker's actual open-for-trading hours per day — in BROKER LOCAL time,
+   *  not UTC. Use Mt5Service.getServerTime() to convert. */
+  tradeSessions: WeekSessions;
+}
+
+export interface BrokerServerTime {
+  /** True UTC instant */
+  utc: Date;
+  /** Broker's current UTC offset in minutes (e.g. +180 = broker is UTC+3).
+   *  Recomputed on every call — self-corrects through DST changes. */
+  offsetMinutes: number;
+}
+
 // ─── Timeframe mapping: env values → MetaApi format ───────────────────────────
 
 const TF_MAP: Record<string, string> = {
@@ -178,6 +204,40 @@ export class Mt5Service {
       spread,
       time:   d.time ?? new Date().toISOString(),
     };
+  }
+
+  // ─── Symbol specification (lot sizing rules, straight from the broker) ────
+
+  async getSymbolSpecification(symbol?: string): Promise<SymbolSpecification> {
+    const sym = symbol ?? this.symbol;
+    const r   = await this.client.get(`${this.acctPath}/symbols/${sym}/specification`);
+    const d   = r.data;
+    return {
+      symbol:        sym,
+      minVolume:     d.minVolume,
+      maxVolume:     d.maxVolume,
+      volumeStep:    d.volumeStep,
+      digits:        d.digits,
+      contractSize:  d.contractSize,
+      tradeSessions: d.tradeSessions ?? {},
+    };
+  }
+
+  /**
+   * Returns the broker's current UTC offset, derived by comparing MetaApi's
+   * true-UTC `time` against the broker's local `brokerTime` in the same
+   * response. Call this fresh on every spec sync rather than caching a
+   * fixed offset — it self-corrects through DST transitions automatically.
+   */
+  async getServerTime(): Promise<BrokerServerTime> {
+    const r = await this.client.get(`${this.acctPath}/server-time`);
+    const d = r.data;
+    const utc         = new Date(d.time);
+    // brokerTime is a naive "YYYY-MM-DD HH:mm:ss.SSS" string with no offset —
+    // parse its digits as if they were UTC to get a comparable instant.
+    const brokerAsUtc = new Date(d.brokerTime.replace(' ', 'T') + 'Z');
+    const offsetMinutes = Math.round((brokerAsUtc.getTime() - utc.getTime()) / 60_000);
+    return { utc, offsetMinutes };
   }
 
   // ─── Candles ──────────────────────────────────────────────────────────────

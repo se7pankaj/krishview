@@ -22,6 +22,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { Candle, SmcService, SMCSignal, StructureEvent } from '../smc/smc.service';
+import { ModeConfig } from '../config/app-config.service';
 
 // ─── Output Types ─────────────────────────────────────────────────────────────
 
@@ -88,7 +89,8 @@ export interface FeatureSet {
 
   // ── Killzone ───────────────────────────────────────────────────────────────
   inKillzone:   boolean;
-  killzoneName: 'London' | 'New York' | 'None';
+  /** Session label — adapts per trading mode (London/NY for Institutional, broader for scalp modes) */
+  killzoneName: string;
 
   momentum:  MomentumFeatures;
   fibonacci: FibonacciFeatures;
@@ -290,11 +292,38 @@ export class FeatureEngineService {
 
   // ─── Killzone Detection ───────────────────────────────────────────────────
 
-  detectKillzone(): { inKillzone: boolean; killzoneName: 'London' | 'New York' | 'None' } {
+  detectKillzone(mode?: ModeConfig): { inKillzone: boolean; killzoneName: string } {
     const utcHour = new Date().getUTCHours();
-    // London Open: 07:00–10:00 UTC
-    if (utcHour >= 7 && utcHour < 10)  return { inKillzone: true,  killzoneName: 'London'   };
-    // New York Open: 13:00–16:00 UTC
+    const day     = new Date().getUTCDay(); // 0=Sun, 6=Sat
+    const isWeekend = day === 0 || day === 6;
+
+    // ── Quick Scalp (H1 HTF) — all weekday hours, no session restriction ─────
+    if (mode?.htfTf === 'H1') {
+      if (isWeekend) return { inKillzone: false, killzoneName: 'Weekend' };
+      // Label by session for AI context, but always active on weekdays
+      if (utcHour >= 0  && utcHour < 7)  return { inKillzone: true, killzoneName: 'Asian session'       };
+      if (utcHour >= 7  && utcHour < 10) return { inKillzone: true, killzoneName: 'London open'          };
+      if (utcHour >= 10 && utcHour < 13) return { inKillzone: true, killzoneName: 'London mid-session'   };
+      if (utcHour >= 13 && utcHour < 16) return { inKillzone: true, killzoneName: 'London-NY overlap'    };
+      if (utcHour >= 16 && utcHour < 20) return { inKillzone: true, killzoneName: 'NY afternoon'         };
+      return { inKillzone: true,  killzoneName: 'Late NY / pre-Asian' };
+    }
+
+    // ── Precision Scalp (H4 HTF) — extended 06:00–20:00 UTC weekdays ─────────
+    if (mode?.htfTf === 'H4') {
+      if (isWeekend) return { inKillzone: false, killzoneName: 'Weekend' };
+      if (utcHour >= 6 && utcHour < 20) {
+        if (utcHour >= 7  && utcHour < 10) return { inKillzone: true, killzoneName: 'London open'        };
+        if (utcHour >= 13 && utcHour < 16) return { inKillzone: true, killzoneName: 'London-NY overlap'  };
+        if (utcHour >= 6  && utcHour < 7)  return { inKillzone: true, killzoneName: 'Pre-London'         };
+        if (utcHour >= 10 && utcHour < 13) return { inKillzone: true, killzoneName: 'London mid-session' };
+        return { inKillzone: true,  killzoneName: 'NY afternoon' };
+      }
+      return { inKillzone: false, killzoneName: 'Off-hours (outside 06–20 UTC)' };
+    }
+
+    // ── Institutional (D1 HTF) — strict London + NY killzones only ───────────
+    if (utcHour >= 7  && utcHour < 10) return { inKillzone: true,  killzoneName: 'London'   };
     if (utcHour >= 13 && utcHour < 16) return { inKillzone: true,  killzoneName: 'New York' };
     return { inKillzone: false, killzoneName: 'None' };
   }
@@ -312,15 +341,27 @@ export class FeatureEngineService {
   // ─── Full Feature Set (5-layer) ───────────────────────────────────────────
 
   compute(
-    d1Candles:  Candle[],   // D1  — macro direction + PDH/PDL
+    d1Candles:  Candle[],   // D1  — macro direction + PDH/PDL (or HTF in non-institutional modes)
     h4Candles:  Candle[],   // H4  — intermediate bias + primary OBs
     h1Candles:  Candle[],   // H1  — structural confirmation
     m15Candles: Candle[],   // M15 — setup refinement
     m5Candles:  Candle[],   // M5  — entry timing
     signal:     SMCSignal | null,
     symbol:     string,
+    /**
+     * Real D1 candles for EMA200 hard block and PDH/PDL when running in
+     * Precision or Quick Scalp mode (where d1Candles is actually H4 or H1).
+     * When provided, macro bias and previous-day levels always use true D1 data.
+     */
+    macroCandles?: Candle[],
+    /** Active trading mode — used for mode-aware killzone detection passed to AI. */
+    modeConfig?: ModeConfig,
   ): FeatureSet {
-    const d1ATR  = this.computeATR(d1Candles);
+    // Use real D1 as macro anchor when available (Precision / Quick Scalp modes).
+    // Falls back to d1Candles when mode is Institutional (d1Candles IS D1 data).
+    const actualD1 = macroCandles && macroCandles.length >= 10 ? macroCandles : d1Candles;
+
+    const d1ATR  = this.computeATR(actualD1);
     const h4ATR  = this.computeATR(h4Candles);
     const h1ATR  = this.computeATR(h1Candles);
     const m15ATR = this.computeATR(m15Candles);
@@ -328,9 +369,9 @@ export class FeatureEngineService {
 
     const price = m5Candles[m5Candles.length - 1].close;
 
-    // D1 macro bias + PDH/PDL
-    const htfBias  = this.smcService.getHTFBias(d1Candles);
-    const pdLevels = this.computePDLevels(d1Candles);
+    // D1 macro bias + PDH/PDL — always computed from real D1 candles
+    const htfBias  = this.smcService.getHTFBias(actualD1);
+    const pdLevels = this.computePDLevels(actualD1);
 
     // H4 intermediate — OBs, FVGs, zone (primary entry zones)
     const h4OBs  = this.smcService.detectOrderBlocks(h4Candles);
@@ -372,14 +413,14 @@ export class FeatureEngineService {
     const fibonacci = this.computeFibonacci(m15Candles);
 
     // Killzone
-    const { inKillzone, killzoneName } = this.detectKillzone();
+    const { inKillzone, killzoneName } = this.detectKillzone(modeConfig);
 
     return {
       symbol,
       timestamp: new Date().toISOString(),
       price,
 
-      d1Trend:  this.computeTrend(d1Candles,  d1ATR),
+      d1Trend:  this.computeTrend(actualD1,   d1ATR),
       h4Trend:  this.computeTrend(h4Candles,  h4ATR),
       h1Trend:  this.computeTrend(h1Candles,  h1ATR),
       m15Trend: this.computeTrend(m15Candles, m15ATR),

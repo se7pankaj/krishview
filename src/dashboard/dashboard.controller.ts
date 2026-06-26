@@ -5,7 +5,7 @@
  * Sprint 4.1 additions: /approvals, /news, /analytics
  */
 
-import { Controller, Get, Post, Param, Logger, Res } from '@nestjs/common';
+import { Controller, Get, Post, Param, Body, Logger, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { JournalService } from '../journal/journal.service';
 import { Mt5Service } from '../mt5/mt5.service';
@@ -16,6 +16,7 @@ import { NewsService } from '../news/news.service';
 import { AnalysisService } from '../analysis/analysis.service';
 import { TradingService } from '../trading/trading.service';
 import { ActiveSymbolService } from '../trading/active-symbol.service';
+import { AppConfigService, TRADING_MODES, TradingMode } from '../config/app-config.service';
 import { SYMBOL_LIST } from '../common/symbol-registry';
 
 // ─── Simple TTL cache to avoid MetaApi 429 rate-limit errors ─────────────────
@@ -46,13 +47,15 @@ export class DashboardController {
     private readonly analysis:      AnalysisService,
     private readonly trading:       TradingService,
     private readonly activeSymbol:  ActiveSymbolService,
+    private readonly appConfig:     AppConfigService,
   ) {}
 
   /** Active config — tier, AI flag, test bypasses */
   @Get('config')
-  getConfig() {
-    const tier = parseInt(this.config.get<string>('TRADING_TIER', '2'), 10);
-    const thresholds: Record<number, number> = { 1: 62, 2: 74, 3: 86 };
+  async getConfig() {
+    // Use active mode from DB — not the legacy TRADING_TIER env var.
+    // TRADING_TIER env is kept only for legacy confluence.service.ts tier logging.
+    const mode = await this.appConfig.getActiveModeConfig();
     const testMode = ['SKIP_KILLZONE_CHECK', 'SKIP_EMA_HARD_BLOCK', 'SKIP_RSI_HARD_BLOCK',
                       'SKIP_OB_FVG_GATE', 'SKIP_ZONE_CHECK']
                      .some(k => this.config.get<string>(k, 'false') === 'true');
@@ -64,9 +67,8 @@ export class DashboardController {
       symbolLabel:     symCfg?.label       ?? this.activeSymbol.getSymbol(),
       symbolEmoji:     symCfg?.emoji       ?? '📊',
       symbolCategory:  symCfg?.category    ?? 'forex',
-      tradingTier:     tier,
-      tierThreshold:   thresholds[tier] ?? 74,
-      tierLabel:       tier === 1 ? 'Aggressive' : tier === 3 ? 'Sniper' : 'Balanced',
+      tradingMode:     mode.label,
+      tierThreshold:   mode.minConfidence,  // accurate to active mode — not TRADING_TIER env
       aiEnabled:       this.config.get<string>('AI_ENABLED', 'false') === 'true',
       skipKillzone:    this.config.get<string>('SKIP_KILLZONE_CHECK', 'false') === 'true',
       skipEmaBlock:    this.config.get<string>('SKIP_EMA_HARD_BLOCK', 'false') === 'true',
@@ -150,61 +152,69 @@ export class DashboardController {
     return this.journal.getAllTimeStats();
   }
 
-  /** Live SMC state — 5-layer: D1 → H4 → H1 → M15 → M5 */
+  /**
+   * Live SMC state — 5-layer using the ACTIVE trading mode's timeframes.
+   * INSTITUTIONAL: D1→H4→H1→M15→M5
+   * PRECISION:     H4→H1→M15→M5→M1
+   * QUICK_SCALP:   H1→M30→M15→M5→M1
+   */
   @Get('smc')
   async smcState() {
     const symbol = this.activeSymbol.getSymbol();
-    const cacheKey = `smc:${symbol}`;
+    const mode   = await this.appConfig.getActiveModeConfig();
+
+    // Cache key includes mode so switching mode busts the cache immediately
+    const cacheKey = `smc:${symbol}:${mode.htfTf}`;
     const cached = this.cache.get<any>(cacheKey);
     if (cached) return cached;
-    const htfTf     = this.config.get<string>('HTF_TF',     'D1');
-    const h4Tf      = this.config.get<string>('H4_TF',      'H4');
-    const confirmTf = this.config.get<string>('CONFIRM_TF', 'H1');
-    const setupTf   = this.config.get<string>('SETUP_TF',   'M15');
-    const entryTf   = this.config.get<string>('ENTRY_TF',   'M5');
 
     try {
-      // historyClient is a separate MetaApi hostname — no 429 risk, no delays needed
-      const d1  = await this.mt5.getCandles(htfTf,     200, symbol);
-      const h4  = await this.mt5.getCandles(h4Tf,      200, symbol);
-      const h1  = await this.mt5.getCandles(confirmTf, 200, symbol);
-      const m15 = await this.mt5.getCandles(setupTf,   200, symbol);
-      const m5  = await this.mt5.getCandles(entryTf,   200, symbol);
+      // Fetch all 5 mode-specific layers (historyClient — no 429 risk)
+      const d1  = await this.mt5.getCandles(mode.htfTf,     200, symbol);
+      const h4  = await this.mt5.getCandles(mode.h4Tf,      200, symbol);
+      const h1  = await this.mt5.getCandles(mode.confirmTf, 200, symbol);
+      const m15 = await this.mt5.getCandles(mode.setupTf,   200, symbol);
+      const m5  = await this.mt5.getCandles(mode.entryTf,   200, symbol);
 
-      const bias   = this.smc.getHTFBias(d1);
-      const obs    = this.smc.detectOrderBlocks(m15);
-      const fvgs   = this.smc.detectFVGs(m15);
-      const sweeps = this.smc.detectLiquiditySweeps(m5);
-      const pd     = this.smc.premiumDiscount(m15);
-      const h4Pd   = this.smc.premiumDiscount(h4);
-      const h4Obs  = this.smc.detectOrderBlocks(h4);
+      const bias      = this.smc.getHTFBias(d1);
+      const obs       = this.smc.detectOrderBlocks(m15);
+      const fvgs      = this.smc.detectFVGs(m15);
+      const sweeps    = this.smc.detectLiquiditySweeps(m5);
+      const pd        = this.smc.premiumDiscount(m15);
+      const h4Pd      = this.smc.premiumDiscount(h4);
+      const h4Obs     = this.smc.detectOrderBlocks(h4);
       const h1Structs = this.smc.detectStructure(h1);
-      const signal = this.smc.analyze(d1, h4, h1, m15, m5);
+      const signal    = this.smc.analyze(d1, h4, h1, m15, m5);
 
       const result = {
+        // Mode info — dashboard uses this to validate panel labels are in sync
+        mode:          mode.label,
+        tfs:           [mode.htfTf, mode.h4Tf, mode.confirmTf, mode.setupTf, mode.entryTf],
+        tierThreshold: mode.minConfidence,
+        // Layer data
         bias,
-        h4Zone:     h4Pd.zone,
-        h4ZonePct:  h4Pd.pct,
-        h4ObCount:  h4Obs.length,
-        h1Bos:      h1Structs.some(s => s.type === 'BOS'),
-        h1Choch:    h1Structs.some(s => s.type === 'CHoCH'),
-        obCount:    obs.length,
-        fvgCount:   fvgs.length,
-        sweepCount: sweeps.filter(s => s.swept).length,
-        zone:       pd.zone,
-        zonePct:    pd.pct,
-        confidence: signal?.confidence ?? 0,
-        direction:  signal?.direction ?? null,
+        h4Zone:        h4Pd.zone,
+        h4ZonePct:     h4Pd.pct,
+        h4ObCount:     h4Obs.length,
+        h1Bos:         h1Structs.some(s => s.type === 'BOS'),
+        h1Choch:       h1Structs.some(s => s.type === 'CHoCH'),
+        obCount:       obs.length,
+        fvgCount:      fvgs.length,
+        sweepCount:    sweeps.filter(s => s.swept).length,
+        zone:          pd.zone,
+        zonePct:       pd.pct,
+        confidence:    signal?.confidence ?? 0,
+        direction:     signal?.direction  ?? null,
       };
 
       this.logger.log(
-        `SMC state: bias=${bias} zone=${pd.zone} h4Zone=${h4Pd.zone} ` +
+        `SMC [${mode.label}]: bias=${bias} zone=${pd.zone} h4Zone=${h4Pd.zone} ` +
         `h4OBs=${h4Obs.length} m15OBs=${obs.length} FVGs=${fvgs.length} ` +
         `h1BOS=${result.h1Bos} h1CHoCH=${result.h1Choch} ` +
         `sweeps=${result.sweepCount} dir=${result.direction ?? 'none'} conf=${result.confidence}%`,
       );
 
-      this.cache.set(cacheKey, result, 60_000); // SMC candles don't change every second — cache 60s
+      this.cache.set(cacheKey, result, 60_000);
       return result;
     } catch (e: any) {
       this.logger.error(`SMC state error: ${e.message}`, e.stack);
@@ -534,39 +544,62 @@ export class DashboardController {
 
   /**
    * GET /dashboard/active-symbol — current symbol + its full config.
-   * Dashboard polls this on load to know which symbol is selected.
+   * Session detection is MODE-AWARE:
+   *   QUICK_SCALP  → active all weekday hours (00:00–23:59 UTC, Mon–Fri)
+   *   PRECISION    → active 06:00–20:00 UTC weekdays
+   *   INSTITUTIONAL → active during symbol's registered London + NY sessions only
    */
   @Get('active-symbol')
-  getActiveSymbol() {
+  async getActiveSymbol() {
     const sym    = this.activeSymbol.getSymbol();
     const cfg    = this.activeSymbol.getConfig();
     const utcH   = new Date().getUTCHours();
-    const inSession = cfg?.sessions.some(s => {
-      if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
-      return utcH >= s.startUtc && utcH < s.endUtc;
-    }) ?? false;
+    const utcDay = new Date().getUTCDay(); // 0=Sun, 6=Sat
+    const isWeekend = utcDay === 0 || utcDay === 6;
 
-    const activeSessions = cfg?.sessions
-      .filter(s => {
+    const mode = await this.appConfig.getActiveModeConfig();
+
+    let inSession: boolean;
+    let activeSessions: string[];
+
+    if (mode.htfTf === 'H1') {
+      // Quick Scalp — all weekday hours
+      inSession      = !isWeekend;
+      activeSessions = inSession ? ['All-day scalp'] : [];
+    } else if (mode.extendedHours) {
+      // Precision — 06:00–20:00 UTC weekdays
+      inSession      = !isWeekend && utcH >= 6 && utcH < 20;
+      activeSessions = inSession ? ['Extended (06–20 UTC)'] : [];
+    } else {
+      // Institutional — use symbol's registered sessions (London + NY)
+      inSession = cfg?.sessions.some(s => {
         if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
         return utcH >= s.startUtc && utcH < s.endUtc;
-      })
-      .map(s => s.name) ?? [];
+      }) ?? false;
+
+      activeSessions = cfg?.sessions
+        .filter(s => {
+          if (s.startUtc > s.endUtc) return utcH >= s.startUtc || utcH < s.endUtc;
+          return utcH >= s.startUtc && utcH < s.endUtc;
+        })
+        .map(s => s.name) ?? [];
+    }
 
     return {
       symbol:          sym,
-      label:           cfg?.label       ?? sym,
-      emoji:           cfg?.emoji       ?? '📊',
-      category:        cfg?.category    ?? 'forex',
-      description:     cfg?.description ?? '',
-      sessions:        cfg?.sessions    ?? [],
-      spreadLimit:     cfg?.spreadLimit ?? 0,
-      pipSize:         cfg?.pipSize     ?? 0.0001,
+      label:           cfg?.label          ?? sym,
+      emoji:           cfg?.emoji          ?? '📊',
+      category:        cfg?.category       ?? 'forex',
+      description:     cfg?.description    ?? '',
+      sessions:        cfg?.sessions       ?? [],
+      spreadLimit:     cfg?.spreadLimit    ?? 0,
+      pipSize:         cfg?.pipSize        ?? 0.0001,
       pipValuePerLot:  cfg?.pipValuePerLot ?? 10,
       inSession,
       activeSessions,
       utcHour:         utcH,
       uaeHour:         (utcH + 4) % 24,
+      activeMode:      mode.label,
     };
   }
 
@@ -590,5 +623,33 @@ export class DashboardController {
       sessions:    result.config?.sessions,
       spreadLimit: result.config?.spreadLimit,
     };
+  }
+
+  // ─── Trading Mode ─────────────────────────────────────────────────────────
+
+  /**
+   * GET /dashboard/trading-mode — returns the active mode + all mode definitions.
+   * Dashboard uses this to render the mode toggle on load.
+   */
+  @Get('trading-mode')
+  async getTradingMode() {
+    const mode   = await this.appConfig.getTradingMode();
+    const config = TRADING_MODES[mode];
+    return { mode, config, all: TRADING_MODES };
+  }
+
+  /**
+   * POST /dashboard/trading-mode — switch trading mode live (no restart needed).
+   * Body: { "mode": "INSTITUTIONAL" | "PRECISION" }
+   */
+  @Post('trading-mode')
+  async setTradingMode(@Body() body: { mode: string }) {
+    const mode = body?.mode as TradingMode;
+    if (!TRADING_MODES[mode]) {
+      return { ok: false, error: `Unknown mode "${mode}". Valid: INSTITUTIONAL, PRECISION, QUICK_SCALP` };
+    }
+    const config = await this.appConfig.setTradingMode(mode);
+    this.logger.log(`Dashboard: trading mode switched → ${mode}`);
+    return { ok: true, mode, config };
   }
 }
