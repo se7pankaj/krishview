@@ -66,7 +66,7 @@ export class AnalysisService {
   ): Promise<AnalysisResult | null> {
     const modeLabel = options?.modeLabel ?? 'Institutional';
     // 1. SMC analysis — 5-layer top-down
-    const smcSignal = this.smc.analyze(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles);
+    const smcSignal = this.smc.analyze(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, options?.modeConfig);
     this.logger.log(`Analysis [${modeLabel}]: SMC signal = ${smcSignal?.direction ?? 'none'}`);
 
     if (!smcSignal) {

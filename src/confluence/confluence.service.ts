@@ -140,7 +140,7 @@ export class ConfluenceService {
     let boost = 0;
 
     // ── Layer 2: EMA Stack ────────────────────────────────────────────────
-    const emaResult = this.checkEmaStack(features, dir, price);
+    const emaResult = this.checkEmaStack(features, dir, price, modeConfig);
     // Only one hard block survives: price wrong side of D1 EMA200
     if (emaResult.hardBlock && !this.skipEmaHardBlock) {
       hardBlocks.push(emaResult.blockReason!);
@@ -150,8 +150,18 @@ export class ConfluenceService {
 
     // ── Layer 3: RSI ──────────────────────────────────────────────────────
     const rsiResult = this.checkRsi(features, dir);
+    // Scalp modes (htfTf=H1) treat RSI extreme as a penalty (−15), not a hard block.
+    // Gold can run RSI 70–80+ for hours/days in a strong rally — a hard block here
+    // kills every BUY signal during the best momentum setups.
+    const isScalpMode = modeConfig?.htfTf === 'H1';
     if (rsiResult.hardBlock && !this.skipRsiHardBlock) {
-      hardBlocks.push(rsiResult.blockReason!);
+      if (isScalpMode) {
+        // Convert hard block to a scoring penalty so confluence can still pass
+        boost -= 15;
+        boostReasons.push(`RSI extreme (${features.momentum?.rsi?.toFixed(1) ?? '?'}) — momentum caution (−15)`);
+      } else {
+        hardBlocks.push(rsiResult.blockReason!);
+      }
     }
     boost += rsiResult.boost;
     boostReasons.push(...rsiResult.boostReasons);
@@ -227,6 +237,7 @@ export class ConfluenceService {
     features: FeatureSet,
     dir: 'BUY' | 'SELL',
     price: number,
+    modeConfig?: ModeConfig,
   ): { hardBlock: boolean; blockReason?: string; boost: number; boostReasons: string[]; aligned: boolean } {
     const d1 = features.d1Trend;
     const h4 = features.h4Trend;
@@ -238,14 +249,39 @@ export class ConfluenceService {
     let blockReason: string | undefined;
     let aligned    = false;
 
-    // ── ONLY hard block: price vs D1 EMA200 ───────────────────────────────
+    // ── D1 EMA200 check — mode-aware ─────────────────────────────────────
+    //
+    // INSTITUTIONAL (D1 timeframe): hard block. D1 EMA200 is the absolute
+    // institutional boundary — never trade against it on daily timeframe.
+    //
+    // SCALPING MODES (Quick Scalp / Precision / Micro Scalp):
+    // Convert to a PENALTY (-15) instead of a hard block.
+    // Reason: gold at 4008 is far above D1 EMA200 (~2800). At scalping level
+    // (M30/M15/M5 timeframes), valid SELL setups exist within bull markets —
+    // short-term corrections of 50-150 pips are normal and tradeable.
+    // The D1 EMA200 adds macro context but must not kill every counter-trend scalp.
+    //
+    // The -15 penalty means counter-trend scalps need stronger local confluence
+    // (RSI divergence, Fib, session timing) to overcome it — which is correct.
+    const isInstitutional = !modeConfig || modeConfig.htfTf === 'D1';
+
     if (dir === 'BUY' && price < d1.ema200) {
-      hardBlock   = true;
-      blockReason = `Price ${price} below D1 EMA200 ${d1.ema200.toFixed(2)} — counter-institutional BUY blocked`;
+      if (isInstitutional) {
+        hardBlock   = true;
+        blockReason = `Price ${price} below D1 EMA200 ${d1.ema200.toFixed(2)} — counter-institutional BUY blocked`;
+      } else {
+        boost -= 15;
+        boostReasons.push(`Counter-trend BUY: price ${price.toFixed(2)} below D1 EMA200 ${d1.ema200.toFixed(2)} — macro bearish context (−15)`);
+      }
     }
     if (dir === 'SELL' && price > d1.ema200) {
-      hardBlock   = true;
-      blockReason = `Price ${price} above D1 EMA200 ${d1.ema200.toFixed(2)} — counter-institutional SELL blocked`;
+      if (isInstitutional) {
+        hardBlock   = true;
+        blockReason = `Price ${price} above D1 EMA200 ${d1.ema200.toFixed(2)} — counter-institutional SELL blocked`;
+      } else {
+        boost -= 15;
+        boostReasons.push(`Counter-trend SELL: price ${price.toFixed(2)} above D1 EMA200 ${d1.ema200.toFixed(2)} — macro bullish context (−15)`);
+      }
     }
 
     // ── Alignment flags ───────────────────────────────────────────────────
@@ -306,6 +342,24 @@ export class ConfluenceService {
     if (dir === 'SELL' && h4.ema20 < h4.ema50) {
       boost += 8;
       boostReasons.push(`H4 EMA20 (${h4.ema20.toFixed(2)}) below EMA50 (${h4.ema50.toFixed(2)}) — H4 bearish momentum (+8)`);
+    }
+
+    // ── Entry-TF EMA20 vs EMA50 momentum direction ───────────────────────
+    // OB entries are pullbacks — price is often BELOW EMA20 at the entry zone,
+    // so checking price vs EMA20 would always penalise the valid setup.
+    // Instead: check if EMA20 is above EMA50 on the entry TF (m5Trend).
+    // EMA20 > EMA50 means the short-term trend is bullish regardless of where price
+    // currently is. This is a bonus-only check — no penalty, since misalignment
+    // is already captured by the D1/H4/H1 EMA stack check above.
+    const m5 = features.m5Trend;
+    if (m5) {
+      if (dir === 'BUY' && m5.ema20 > m5.ema50) {
+        boost += 8;
+        boostReasons.push(`Entry-TF EMA20 (${m5.ema20.toFixed(2)}) > EMA50 (${m5.ema50.toFixed(2)}) — short-term trend bullish (+8)`);
+      } else if (dir === 'SELL' && m5.ema20 < m5.ema50) {
+        boost += 8;
+        boostReasons.push(`Entry-TF EMA20 (${m5.ema20.toFixed(2)}) < EMA50 (${m5.ema50.toFixed(2)}) — short-term trend bearish (+8)`);
+      }
     }
 
     return { hardBlock, blockReason, boost, boostReasons, aligned };
@@ -475,23 +529,25 @@ export class ConfluenceService {
       return { boost: 0, boostReasons: [], spike: false };
     }
 
-    // L3→L5 ratio: how many entry candles fit inside one L3 candle
-    //   Institutional:  H1 → M5  = 12 M5 per H1
-    //   Precision:      M15 → M1 =  15 M1 per M15
-    //   Quick Scalp:    M15 → M1 =  15 M1 per M15
+    // L3→L5 ratio: how many entry candles fit inside one L3 candle.
+    // Use confirmTf (actual L3 timeframe) — not htfTf — so MICRO_SCALP gets its own ratio.
+    //   Institutional:  L3=H1  → L5=M5  = 12 M5  per H1
+    //   Precision/QS:   L3=M15 → L5=M1  = 15 M1  per M15
+    //   Micro Scalp:    L3=M5  → L5=M1  =  5 M1  per M5
     const l3ToL5Ratio =
-      modeConfig?.htfTf === 'D1' ? 12 :   // Institutional: H1 baseline / 12 = M5 equiv
-      modeConfig?.htfTf === 'H4' ? 15 :   // Precision: M15 baseline / 15 = M1 equiv
-      modeConfig?.htfTf === 'H1' ? 15 :   // Quick Scalp: M15 baseline / 15 = M1 equiv
-      12;                                   // Fallback
+      modeConfig?.confirmTf === 'H1'  ? 12 :  // Institutional
+      modeConfig?.confirmTf === 'M15' ? 15 :  // Precision / Quick Scalp
+      modeConfig?.confirmTf === 'M5'  ? 5  :  // Micro Scalp
+      12;                                      // Fallback
 
     const l5Baseline = avgL3 / l3ToL5Ratio;
     const recentL5   = l5Candles.slice(-3);
     const maxL5Vol   = Math.max(...recentL5.map(c => c.volume ?? 0));
     const volRatio   = l5Baseline > 0 ? maxL5Vol / l5Baseline : 0;
 
-    const l3Label = modeConfig?.htfTf === 'D1' ? 'H1' : 'M15';
-    const l5Label = modeConfig?.htfTf === 'D1' ? 'M5' : 'M1';
+    // Accurate TF labels from modeConfig for log output
+    const l3Label = modeConfig?.confirmTf ?? 'H1';
+    const l5Label = modeConfig?.entryTf   ?? 'M5';
 
     this.logger.debug(
       `Volume: ${l3Label}avg=${avgL3.toFixed(0)} ${l5Label}base=${l5Baseline.toFixed(0)} ` +

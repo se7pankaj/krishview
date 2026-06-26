@@ -64,7 +64,27 @@ interface ModePromptConfig {
 }
 
 function getModePromptConfig(mode?: ModeConfig): ModePromptConfig {
-  // ── Quick Scalp ────────────────────────────────────────────────────────────
+  // ── Micro Scalp — H1→M15→M5→M1→M1 ───────────────────────────────────────
+  // Distinguished from Quick Scalp by h4Tf='M15' (QS uses h4Tf='M30').
+  // D1 macroCandles always fetched for EMA200 institutional anchor.
+  // L4 and L5 both use M1 candles — SMC engine uses the full array for OB/FVG
+  // detection (L4) and the 3 most recent candles for entry trigger (L5).
+  if (mode?.htfTf === 'H1' && mode?.h4Tf === 'M15') {
+    return {
+      frameworkDesc: 'D1 (macro anchor) → H1 → M15 → M5 → M1',
+      layers: ['D1', 'M15', 'M5', 'M1', 'M1'],
+      obLayer:     'M15',
+      bosLayer:    'M5',
+      sessionNote: 'All weekday hours are valid — no session restriction. Ultra-short pyramid targeting immediate M1 momentum after M15 OB touch.',
+      minRR:       1.2,
+      minConf:     mode.minConfidence,
+      confNote:    `Never recommend a trade when confidence is below ${mode.minConfidence}. This is a high-frequency mode — quality over quantity still applies.`,
+      rrNote:      'Minimum 1.2:1 Risk:Reward. Tight SL allows more frequent entries while staying profitable with a 55%+ win rate.',
+      slNote:      'SL must sit below/above the M15 Order Block or the M5 swing extreme — never more than 15 pips for XAUUSD.',
+    };
+  }
+
+  // ── Quick Scalp — H1→M30→M15→M5→M1 ─────────────────────────────────────
   if (mode?.htfTf === 'H1') {
     return {
       frameworkDesc: 'D1 (macro anchor) → M30 → M15 → M5 → M1',

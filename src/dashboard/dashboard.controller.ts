@@ -683,7 +683,7 @@ export class DashboardController {
   async setTradingMode(@Body() body: { mode: string }) {
     const mode = body?.mode as TradingMode;
     if (!TRADING_MODES[mode]) {
-      return { ok: false, error: `Unknown mode "${mode}". Valid: INSTITUTIONAL, PRECISION, QUICK_SCALP` };
+      return { ok: false, error: `Unknown mode "${mode}". Valid: INSTITUTIONAL, PRECISION, QUICK_SCALP, MICRO_SCALP` };
     }
     const config = await this.appConfig.setTradingMode(mode);
     this.logger.log(`Dashboard: trading mode switched → ${mode}`);

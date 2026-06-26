@@ -7,6 +7,7 @@
 
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ModeConfig } from '../config/app-config.service';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -181,7 +182,10 @@ export class SmcService {
     const bears = recent.filter(s => s.bias === 'BEARISH').length;
     if (bulls > bears) return 'BULLISH';
     if (bears > bulls) return 'BEARISH';
-    return 'NEUTRAL';
+    // Equal count: use the MOST RECENT structure event as tiebreaker instead of
+    // blocking all trades. A 3/3 split with the last event bullish still has
+    // bullish momentum — better to trade it with lower confidence than skip it.
+    return structs[structs.length - 1].bias;
   }
 
   // ─── 2. Order Blocks ──────────────────────────────────────────────────────
@@ -359,14 +363,29 @@ export class SmcService {
    */
   analyze(
     d1Candles:  Candle[],
-    h4Candles:  Candle[],   // NEW — intermediate bias layer
-    h1Candles:  Candle[],
-    m15Candles: Candle[],
-    m5Candles:  Candle[],
+    h4Candles:  Candle[],   // L2 slot — M30 in QS, H4 in Institutional
+    h1Candles:  Candle[],   // L3 slot — M15 in QS, H1 in Institutional
+    m15Candles: Candle[],   // L4 slot — M5 in QS, M15 in Institutional
+    m5Candles:  Candle[],   // L5 slot — M1 in QS, M5 in Institutional
+    modeConfig?: ModeConfig,
   ): SMCSignal | null {
-    const price     = m5Candles[m5Candles.length - 1].close;
-    const threshold = this.confidenceThreshold;
-    const minRR     = this.minRR;
+    const price = m5Candles[m5Candles.length - 1].close;
+
+    // Mode-aware internal threshold.
+    // The SMC score must exceed this BEFORE confluence runs. Set it low enough
+    // that confluence can do its work (add session/EMA/RSI/Fib boosts).
+    // Formula: mode.minConfidence − 20, floored at 35.
+    // Quick Scalp  (≥58%): SMC gate = 38  — confluece adds the remaining margin
+    // Precision    (≥62%): SMC gate = 42
+    // Institutional(≥74%): SMC gate = 54
+    const threshold = modeConfig
+      ? Math.max(modeConfig.minConfidence - 20, 35)
+      : this.confidenceThreshold;
+
+    // Mode-aware minimum RR for TP placement.
+    // Quick Scalp / Micro Scalp: 1.5 (tighter targets, more frequent fills)
+    // Precision / Institutional: 2.0
+    const effectiveMinRR = modeConfig?.htfTf === 'H1' ? 1.5 : this.minRR;
 
     // ── Layer 1: D1 macro bias ───────────────────────────────────────────────
     const htfBias = this.getHTFBias(d1Candles);
@@ -378,6 +397,8 @@ export class SmcService {
     const h4OBs     = this.detectOrderBlocks(h4Candles);
     const h4FVGs    = this.detectFVGs(h4Candles);
     const h4ATR     = this.atr(h4Candles);
+    // ATR of the L4 slot (M5 in QS, M15 in Institutional) — used for M15 OB proximity
+    const m15ATR    = this.atr(m15Candles);
 
     // Zone calculation uses the LAST 40 candles only (not all 200).
     // Using 200 candles in a trending market sets swingHigh to weeks-old extremes —
@@ -409,9 +430,11 @@ export class SmcService {
     // ════════════════════════════════════════════════════════════════════════
     if (htfBias === 'BULLISH') {
       // Zone gate: H4 discount OR equilibrium zone is valid for longs.
-      // "Equilibrium" (45-55% of recent range) is also a valid SMC entry — price
-      // at fair value with bullish bias still has positive expectancy.
-      if (h4Pd.zone === 'premium' && !this.skipZoneCheck) {
+      // SCALP MODES (htfTf=H1) skip this gate entirely — in trending markets the
+      // 40-candle M30 range shows "premium" almost every cycle, permanently blocking
+      // BUY signals. Momentum scalps trade WITH the trend from OBs, not against it.
+      const isScalpMode = modeConfig?.htfTf === 'H1';
+      if (!isScalpMode && h4Pd.zone === 'premium' && !this.skipZoneCheck) {
         this.logger.log(`SMC LONG skip: H4 in premium (need discount or equilibrium)`);
         return null;
       }
@@ -428,18 +451,26 @@ export class SmcService {
         confidence += 5;
       }
 
-      // H4 OB touch — HIGHEST WEIGHT (institutional level)
+      // H4 OB proximity — ATR-based, not exact inside-OB.
+      // "Within 0.5 ATR of the OB bounds" catches price approaching the zone
+      // (the actual entry signal in SMC) not just price already inside it.
+      // In QS mode h4ATR is M30 ATR; in Institutional it's true H4 ATR.
       const h4Ob = [...h4OBs].reverse().find(o =>
-        o.type === 'BULLISH_OB' && price >= o.low * 0.999 && price <= o.high * 1.005,
+        o.type === 'BULLISH_OB' &&
+        price >= o.low  - h4ATR * 0.5 &&
+        price <= o.high + h4ATR * 0.5,
       );
       if (h4Ob) {
-        reasons.push(`H4 Bullish OB ${h4Ob.low.toFixed(2)}–${h4Ob.high.toFixed(2)} str:${h4Ob.strength}`);
-        confidence += 25;
+        const inside = price >= h4Ob.low && price <= h4Ob.high;
+        reasons.push(`H4 Bullish OB ${h4Ob.low.toFixed(2)}–${h4Ob.high.toFixed(2)} str:${h4Ob.strength}${inside ? '' : ' (approaching)'}`);
+        confidence += inside ? 25 : 15;  // full bonus if inside, partial if approaching
       }
 
-      // H4 FVG fill
+      // H4 FVG proximity — allow ± 0.3 ATR approach
       const h4Fvg = [...h4FVGs].reverse().find(f =>
-        f.type === 'BULLISH_FVG' && price >= f.low && price <= f.high,
+        f.type === 'BULLISH_FVG' &&
+        price >= f.low  - h4ATR * 0.3 &&
+        price <= f.high + h4ATR * 0.3,
       );
       if (h4Fvg) {
         reasons.push(`H4 Bullish FVG ${h4Fvg.low.toFixed(2)}–${h4Fvg.high.toFixed(2)}`);
@@ -461,18 +492,22 @@ export class SmcService {
         confidence += 12;
       }
 
-      // M15 OB refinement
+      // M15 OB refinement — ATR-based proximity (m15ATR = L4 slot ATR)
       const m15Ob = [...m15OBs].reverse().find(o =>
-        o.type === 'BULLISH_OB' && price >= o.low && price <= o.high * 1.003,
+        o.type === 'BULLISH_OB' &&
+        price >= o.low  - m15ATR * 0.5 &&
+        price <= o.high + m15ATR * 0.5,
       );
       if (m15Ob) {
         reasons.push(`M15 Bullish OB ${m15Ob.low.toFixed(2)}–${m15Ob.high.toFixed(2)}`);
         confidence += 8;
       }
 
-      // M15 FVG refinement
+      // M15 FVG refinement — ATR-based proximity
       const m15Fvg = [...m15FVGs].reverse().find(f =>
-        f.type === 'BULLISH_FVG' && price >= f.low && price <= f.high,
+        f.type === 'BULLISH_FVG' &&
+        price >= f.low  - m15ATR * 0.3 &&
+        price <= f.high + m15ATR * 0.3,
       );
       if (m15Fvg) {
         reasons.push(`M15 Bullish FVG ${m15Fvg.low.toFixed(2)}–${m15Fvg.high.toFixed(2)}`);
@@ -488,10 +523,40 @@ export class SmcService {
         confidence += 10;
       }
 
+      // ── Candle body confirmation at zone ─────────────────────────────────
+      // In SMC the SETUP candle at an OB is often bearish (stop hunt / liquidity
+      // sweep grabs stops below the zone). The CONFIRMATION candle follows 1-2 bars
+      // later. So we look at the last 3 entry-TF candles and reward if any of them
+      // shows a strong bullish close — but NEVER penalise a bearish candle (it is the
+      // expected sweep before the reversal).
+      const hasZone = h4Ob || h4Fvg || m15Ob || m15Fvg;
+      if (hasZone) {
+        const last   = m5Candles[m5Candles.length - 1];
+        const prev   = m5Candles[m5Candles.length - 2];
+        // Engulfing: last candle closes above prev open AND opens below prev close
+        const isEngulfing = prev &&
+          last.close > last.open &&
+          last.close > prev.open &&
+          last.open  < prev.close;
+        if (isEngulfing) {
+          reasons.push('Bullish engulfing at BUY zone — institutional entry confirmed (+15)');
+          confidence += 15;
+        } else {
+          // Any strong bullish close in the last 3 candles counts as partial confirmation
+          const recentBullish = m5Candles.slice(-3).find(c => {
+            const r = (c.high - c.low) || 0.0001;
+            return c.close > c.open && (c.close - c.open) / r > 0.5;
+          });
+          if (recentBullish) {
+            reasons.push('Bullish candle in last 3 bars at zone — partial confirmation (+8)');
+            confidence += 8;
+          }
+        }
+      }
+
       confidence = Math.min(confidence, 100);
       this.logger.log(`SMC LONG ${confidence}% — ${reasons.join(' | ')}`);
 
-      const hasZone  = h4Ob || h4Fvg || m15Ob || m15Fvg;
       const gatePass = confidence >= threshold && (hasZone || this.skipObFvgGate);
       if (!gatePass) {
         this.logger.log(`SMC LONG blocked: conf=${confidence}% thresh=${threshold} zone=${!!hasZone} skip=${this.skipObFvgGate}`);
@@ -502,7 +567,7 @@ export class SmcService {
       const slRef  = h4Ob ? h4Ob.low : m15Ob ? m15Ob.low : (h4Fvg ? h4Fvg.low : price - h4ATR * 1.5);
       const sl     = +(slRef - h4ATR * 0.3).toFixed(2);
       const risk   = price - sl;
-      const tp     = +(price + risk * Math.max(minRR, 2)).toFixed(2);
+      const tp     = +(price + risk * Math.max(effectiveMinRR, effectiveMinRR)).toFixed(2);
       const rr     = +((tp - price) / risk).toFixed(2);
 
       return {
@@ -520,9 +585,10 @@ export class SmcService {
     // ════════════════════════════════════════════════════════════════════════
     if (htfBias === 'BEARISH') {
       // Zone gate: H4 premium OR equilibrium zone is valid for shorts.
-      // Strict "premium only" blocks all signals in trending markets — price never
-      // reaches the old swing high that defined "premium" on 200 candles.
-      if (h4Pd.zone === 'discount' && !this.skipZoneCheck) {
+      // SCALP MODES (htfTf=H1) skip this gate — in trending markets price is often
+      // in "discount" of the recent M30 range, permanently blocking SELL signals.
+      const isScalpMode = modeConfig?.htfTf === 'H1';
+      if (!isScalpMode && h4Pd.zone === 'discount' && !this.skipZoneCheck) {
         this.logger.log(`SMC SHORT skip: H4 in discount (need premium or equilibrium)`);
         return null;
       }
@@ -540,15 +606,20 @@ export class SmcService {
       }
 
       const h4Ob = [...h4OBs].reverse().find(o =>
-        o.type === 'BEARISH_OB' && price >= o.low * 0.999 && price <= o.high * 1.005,
+        o.type === 'BEARISH_OB' &&
+        price >= o.low  - h4ATR * 0.5 &&
+        price <= o.high + h4ATR * 0.5,
       );
       if (h4Ob) {
-        reasons.push(`H4 Bearish OB ${h4Ob.low.toFixed(2)}–${h4Ob.high.toFixed(2)} str:${h4Ob.strength}`);
-        confidence += 25;
+        const inside = price >= h4Ob.low && price <= h4Ob.high;
+        reasons.push(`H4 Bearish OB ${h4Ob.low.toFixed(2)}–${h4Ob.high.toFixed(2)} str:${h4Ob.strength}${inside ? '' : ' (approaching)'}`);
+        confidence += inside ? 25 : 15;
       }
 
       const h4Fvg = [...h4FVGs].reverse().find(f =>
-        f.type === 'BEARISH_FVG' && price >= f.low && price <= f.high,
+        f.type === 'BEARISH_FVG' &&
+        price >= f.low  - h4ATR * 0.3 &&
+        price <= f.high + h4ATR * 0.3,
       );
       if (h4Fvg) {
         reasons.push(`H4 Bearish FVG ${h4Fvg.low.toFixed(2)}–${h4Fvg.high.toFixed(2)}`);
@@ -569,7 +640,9 @@ export class SmcService {
       }
 
       const m15Ob = [...m15OBs].reverse().find(o =>
-        o.type === 'BEARISH_OB' && price >= o.low && price <= o.high * 1.003,
+        o.type === 'BEARISH_OB' &&
+        price >= o.low  - m15ATR * 0.5 &&
+        price <= o.high + m15ATR * 0.5,
       );
       if (m15Ob) {
         reasons.push(`M15 Bearish OB ${m15Ob.low.toFixed(2)}–${m15Ob.high.toFixed(2)}`);
@@ -577,7 +650,9 @@ export class SmcService {
       }
 
       const m15Fvg = [...m15FVGs].reverse().find(f =>
-        f.type === 'BEARISH_FVG' && price >= f.low && price <= f.high,
+        f.type === 'BEARISH_FVG' &&
+        price >= f.low  - m15ATR * 0.3 &&
+        price <= f.high + m15ATR * 0.3,
       );
       if (m15Fvg) {
         reasons.push(`M15 Bearish FVG ${m15Fvg.low.toFixed(2)}–${m15Fvg.high.toFixed(2)}`);
@@ -592,10 +667,36 @@ export class SmcService {
         confidence += 10;
       }
 
+      // ── Candle body confirmation at zone ─────────────────────────────────
+      // SELL equivalent: the setup candle at a bearish OB is often bullish (stop hunt
+      // sweeps highs before the drop). Look at last 3 candles, reward confirmation,
+      // never penalise the sweep candle.
+      const hasZone = h4Ob || h4Fvg || m15Ob || m15Fvg;
+      if (hasZone) {
+        const last = m5Candles[m5Candles.length - 1];
+        const prev = m5Candles[m5Candles.length - 2];
+        const isBearishEngulfing = prev &&
+          last.close < last.open &&
+          last.close < prev.open &&
+          last.open  > prev.close;
+        if (isBearishEngulfing) {
+          reasons.push('Bearish engulfing at SELL zone — institutional rejection confirmed (+15)');
+          confidence += 15;
+        } else {
+          const recentBearish = m5Candles.slice(-3).find(c => {
+            const r = (c.high - c.low) || 0.0001;
+            return c.close < c.open && (c.open - c.close) / r > 0.5;
+          });
+          if (recentBearish) {
+            reasons.push('Bearish candle in last 3 bars at zone — partial confirmation (+8)');
+            confidence += 8;
+          }
+        }
+      }
+
       confidence = Math.min(confidence, 100);
       this.logger.log(`SMC SHORT ${confidence}% — ${reasons.join(' | ')}`);
 
-      const hasZone  = h4Ob || h4Fvg || m15Ob || m15Fvg;
       const gatePass = confidence >= threshold && (hasZone || this.skipObFvgGate);
       if (!gatePass) {
         this.logger.log(`SMC SHORT blocked: conf=${confidence}% thresh=${threshold} zone=${!!hasZone} skip=${this.skipObFvgGate}`);
@@ -605,7 +706,7 @@ export class SmcService {
       const slRef = h4Ob ? h4Ob.high : m15Ob ? m15Ob.high : (h4Fvg ? h4Fvg.high : price + h4ATR * 1.5);
       const sl    = +(slRef + h4ATR * 0.3).toFixed(2);
       const risk  = sl - price;
-      const tp    = +(price - risk * Math.max(minRR, 2)).toFixed(2);
+      const tp    = +(price - risk * effectiveMinRR).toFixed(2);
       const rr    = +((price - tp) / risk).toFixed(2);
 
       return {

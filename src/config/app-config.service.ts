@@ -15,7 +15,7 @@ import { AppConfig } from './entities/app-config.entity';
 
 // ─── Trading Mode ─────────────────────────────────────────────────────────────
 
-export type TradingMode = 'INSTITUTIONAL' | 'PRECISION' | 'QUICK_SCALP';
+export type TradingMode = 'INSTITUTIONAL' | 'PRECISION' | 'QUICK_SCALP' | 'MICRO_SCALP';
 
 export interface ModeConfig {
   label:        string;
@@ -66,6 +66,17 @@ export const TRADING_MODES: Record<TradingMode, ModeConfig> = {
     minConfidence: 58,
     extendedHours: true,  // uses extended-hours path; all-day handled in TradingService
   },
+  MICRO_SCALP: {
+    label:         'Micro Scalp',
+    description:   'H1→M15→M5→M1→M1 · ≥55% · All-day 00:00–23:59 UTC weekdays — ultra-short pyramid',
+    htfTf:         'H1',   // H1 = direction bias (htfTf=H1 → all-day session detection)
+    h4Tf:          'M15',  // M15 = money layer / primary OBs
+    confirmTf:     'M5',   // M5  = BOS / CHoCH structure confirmation
+    setupTf:       'M1',   // M1  = OB/FVG setup zone
+    entryTf:       'M1',   // M1  = entry trigger (same TF, SMC engine uses latest candles)
+    minConfidence: 55,
+    extendedHours: true,  // all-day handled by htfTf=H1 check in TradingService
+  },
 };
 
 const MODE_KEY = 'TRADING_MODE';
@@ -93,7 +104,7 @@ export class AppConfigService {
   /** Returns the active trading mode, defaulting to INSTITUTIONAL. */
   async getTradingMode(): Promise<TradingMode> {
     const raw = await this.get(MODE_KEY, 'INSTITUTIONAL');
-    if (raw === 'PRECISION' || raw === 'QUICK_SCALP') return raw;
+    if (raw === 'PRECISION' || raw === 'QUICK_SCALP' || raw === 'MICRO_SCALP') return raw;
     return 'INSTITUTIONAL';
   }
 

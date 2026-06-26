@@ -290,6 +290,15 @@ body {
   background: linear-gradient(135deg, rgba(251,146,60,0.25), rgba(251,146,60,0.15));
   border-color: rgba(251,146,60,0.5);
 }
+.btn-mode.micro {
+  background: linear-gradient(135deg, rgba(244,63,94,0.15), rgba(244,63,94,0.08));
+  color: #fb7185; border-color: rgba(244,63,94,0.3);
+  box-shadow: 0 1px 12px rgba(244,63,94,0.1), inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.btn-mode.micro:hover {
+  background: linear-gradient(135deg, rgba(244,63,94,0.25), rgba(244,63,94,0.15));
+  border-color: rgba(244,63,94,0.5);
+}
 
 /* ══════════════════════════════════════════════════
    LAYOUT
@@ -1550,6 +1559,7 @@ const MODE_TIER = {
   INSTITUTIONAL: { cls: 'tier-2', text: 'T2 · Balanced · ≥74%',    thresh: '≥ 74%', lbl: 'Balanced mode'    },
   PRECISION:     { cls: 'tier-1', text: 'T1 · Aggressive · ≥62%',   thresh: '≥ 62%', lbl: 'Precision mode'   },
   QUICK_SCALP:   { cls: 'tier-1', text: 'Scalp · ≥58%',             thresh: '≥ 58%', lbl: 'Quick Scalp mode' },
+  MICRO_SCALP:   { cls: 'tier-1', text: 'Micro · ≥55%',             thresh: '≥ 55%', lbl: 'Micro Scalp mode' },
 };
 
 function applyModeUI(mode, config) {
@@ -1557,7 +1567,11 @@ function applyModeUI(mode, config) {
   const btn   = $('modeBtn');
   const label = $('modeBtnLabel');
   if (btn && label) {
-    if (mode === 'QUICK_SCALP') {
+    if (mode === 'MICRO_SCALP') {
+      btn.className     = 'btn btn-mode micro';
+      label.textContent = `⚡⚡⚡ ${config?.label ?? 'Micro Scalp'}`;
+      btn.title         = config?.description ?? 'Micro Scalp mode — H1→M15→M5→M1';
+    } else if (mode === 'QUICK_SCALP') {
       btn.className     = 'btn btn-mode quick';
       label.textContent = `⚡⚡ ${config?.label ?? 'Quick Scalp'}`;
       btn.title         = config?.description ?? 'Quick Scalp mode active';
@@ -1593,7 +1607,7 @@ function applyModeUI(mode, config) {
   if (tl) tl.textContent = tier.lbl;
 }
 
-const MODE_CYCLE = ['INSTITUTIONAL', 'PRECISION', 'QUICK_SCALP'];
+const MODE_CYCLE = ['INSTITUTIONAL', 'PRECISION', 'QUICK_SCALP', 'MICRO_SCALP'];
 
 async function toggleTradingMode() {
   const btn = $('modeBtn');
