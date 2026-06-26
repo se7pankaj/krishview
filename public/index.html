@@ -971,6 +971,7 @@ async function loadSymbolDropdown() {
 }
 
 // Update session card immediately from symbol's sessions array (no extra API call needed)
+// NOTE: only used as a fallback — applySessionCardFromApi() is preferred for mode-awareness.
 function applySessionCard(symbol, sessions) {
   const utcH = new Date().getUTCHours();
   const uaeH = (utcH + 4) % 24;
@@ -996,6 +997,37 @@ function applySessionCard(symbol, sessions) {
   }
 }
 
+// Mode-aware session card update — uses inSession/activeSessions from the backend.
+// Works correctly for all 3 modes: Quick Scalp (all weekday hours), Precision (06-20 UTC),
+// Institutional (London+NY windows only).
+function applySessionCardFromApi(symbol, sym) {
+  const uae = sym?.uaeHour ?? ((new Date().getUTCHours() + 4) % 24);
+  if (sym?.inSession && sym.activeSessions && sym.activeSessions.length) {
+    const sessionNames = sym.activeSessions.join(' + ');
+    const isOverlap    = sym.activeSessions.length > 1;
+    if (isOverlap) {
+      $('sessionLabel').innerHTML = `🔥 ${sessionNames}`;
+      $('sessionLabel').style.color = 'var(--gold)';
+      $('sessionCard').className  = 'card card-gold mc';
+      $('sessionSub').textContent = `${symbol} overlap — UAE ${uae}:xx`;
+    } else {
+      $('sessionLabel').innerHTML = `✅ ${sessionNames}`;
+      $('sessionLabel').style.color = 'var(--green)';
+      $('sessionCard').className  = 'card card-green mc';
+      $('sessionSub').innerHTML   = `${symbol} active — UAE ${uae}:xx`;
+    }
+  } else {
+    const nextSessions = (sym?.sessions || []).map(s => {
+      const startUae = (s.startUtc + 4) % 24;
+      return `${s.name} ${startUae}:00 UAE`;
+    }).join(', ') || '—';
+    $('sessionLabel').innerHTML  = '😴 Off-Hours';
+    $('sessionLabel').style.color = 'var(--muted)';
+    $('sessionCard').className   = 'card mc';
+    $('sessionSub').innerHTML    = `${symbol} — Next: ${nextSessions}`;
+  }
+}
+
 async function switchSymbol(symbol) {
   if (!symbol) return;
 
@@ -1011,7 +1043,10 @@ async function switchSymbol(symbol) {
   $('priceLabel').textContent = symbol;
   $('liveBid').textContent    = '…';
   $('liveAsk').textContent    = '…';
-  applySessionCard(symbol, data.sessions); // update session card from set-symbol response
+  // Session card — use mode-aware inSession/activeSessions from set-symbol response.
+  // applySessionCard() used raw session hours (INSTITUTIONAL logic only) and would
+  // always show "Off-Hours" for Quick Scalp / Precision outside London+NY windows.
+  applySessionCardFromApi(symbol, data);
 
   // 3. Non-MetaApi calls — fire in parallel (DB / historyClient, no rate limit)
   refreshSmc();
