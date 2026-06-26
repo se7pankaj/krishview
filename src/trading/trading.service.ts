@@ -173,10 +173,25 @@ export class TradingService implements OnApplicationBootstrap {
   // ─── SMC + AI + Approval Cycle ────────────────────────────────────────────
 
   async runSMCCycle(): Promise<void> {
-    try {
-      await this.executeSMCCycle();
-    } catch (e: any) {
-      this.logger.error(`SMC cycle error: ${e.message}`);
+    // Retry once on transient MetaApi errors (504, timeout, socket hang up).
+    // A single retry with a 10s gap recovers from brief cloud blips without
+    // hammering the API on a genuine outage.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await this.executeSMCCycle();
+        return;
+      } catch (e: any) {
+        const msg = e?.message ?? '';
+        const isTransient = msg.includes('504') || msg.includes('timeout') ||
+                            msg.includes('socket hang up') || msg.includes('ECONNRESET');
+        if (isTransient && attempt === 1) {
+          this.logger.warn(`SMC cycle transient error (attempt ${attempt}): ${msg} — retrying in 10s`);
+          await new Promise(r => setTimeout(r, 10_000));
+        } else {
+          this.logger.error(`SMC cycle error (attempt ${attempt}): ${msg}`);
+          return;
+        }
+      }
     }
   }
 
