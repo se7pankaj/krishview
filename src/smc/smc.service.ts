@@ -492,6 +492,15 @@ export class SmcService {
         confidence += 12;
       }
 
+      // Counter-structure penalty: if the L3 (structural confirmation) layer shows
+      // more bearish structures than bullish for a BUY signal, the setup is conflicted.
+      // The AI catches this and says WAIT — so penalise here to give AI an honest score.
+      if (h1BearStructs.length > h1BullStructs.length) {
+        const penalty = h1BearStructs.length >= 3 ? 18 : 10;
+        reasons.push(`L3 counter-structure: ${h1BearStructs.length} bearish vs ${h1BullStructs.length} bullish — conflicted (−${penalty})`);
+        confidence -= penalty;
+      }
+
       // M15 OB refinement — ATR-based proximity (m15ATR = L4 slot ATR)
       const m15Ob = [...m15OBs].reverse().find(o =>
         o.type === 'BULLISH_OB' &&
@@ -637,6 +646,13 @@ export class SmcService {
         const last = h1BearStructs[h1BearStructs.length - 1];
         reasons.push(`H1 ${last.type} Bearish @ ${last.price.toFixed(2)}`);
         confidence += 12;
+      }
+
+      // Counter-structure penalty for SHORT
+      if (h1BullStructs.length > h1BearStructs.length) {
+        const penalty = h1BullStructs.length >= 3 ? 18 : 10;
+        reasons.push(`L3 counter-structure: ${h1BullStructs.length} bullish vs ${h1BearStructs.length} bearish — conflicted (−${penalty})`);
+        confidence -= penalty;
       }
 
       const m15Ob = [...m15OBs].reverse().find(o =>
