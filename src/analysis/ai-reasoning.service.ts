@@ -81,18 +81,23 @@ function getModePromptConfig(mode?: ModeConfig): ModePromptConfig {
   }
 
   // ── Precision Scalp ────────────────────────────────────────────────────────
+  // Data-flow note: Precision's htfTf='H4' candles are passed as d1Candles to
+  // analysis.run() and overridden by macroCandles (real D1) for the EMA200 anchor.
+  // The feature-engine's "h4 slot" holds H1 candles (mode.h4Tf='H1');
+  // the "h1 slot" holds M15 candles (mode.confirmTf='M15').
+  // Layers here reflect what the feature-engine ACTUALLY computed, not the TF names.
   if (mode?.htfTf === 'H4') {
     return {
-      frameworkDesc: 'D1 (macro anchor) → H4 → H1 → M15 → M5 → M1',
-      layers: ['D1', 'H4', 'H1', 'M15', 'M1'],
-      obLayer:     'H4',
-      bosLayer:    'H1 or H4',
-      sessionNote: 'Extended hours 06:00–20:00 UTC weekdays. London, London-NY overlap, and NY afternoon are all valid.',
+      frameworkDesc: 'H4 direction + D1 (macro anchor) → H1 → M15 → M5 → M1',
+      layers: ['D1', 'H1', 'M15', 'M5', 'M1'],
+      obLayer:     'H1',
+      bosLayer:    'M15',
+      sessionNote: 'Extended hours 06:00–20:00 UTC weekdays. H4 provides directional bias (shown in SMC signal); H1 Order Blocks are the primary entry zones for this mode.',
       minRR:       2.0,
       minConf:     mode.minConfidence,
       confNote:    `Never recommend a trade when confidence is below ${mode.minConfidence}.`,
       rrNote:      'Minimum 2:1 Risk:Reward.',
-      slNote:      'SL must sit below/above the H4 Order Block.',
+      slNote:      'SL must sit below/above the H1 Order Block (the primary money layer for Precision mode).',
     };
   }
 
@@ -147,42 +152,63 @@ export class AiReasoningService {
 
     const [l1, l2, l3, l4, l5] = mpc.layers;
 
-    return `You are an elite institutional ${expertise} with 20+ years experience.
-You are currently analysing ${label} (${sym}). ${desc}.
-You specialise in Smart Money Concepts (SMC) with a ${mpc.frameworkDesc} framework:
-  ${l1}  → Macro bias — D1 EMA200 is the absolute directional boundary (never trade against it)
-  ${l2}  → Primary entry zones — ${mpc.obLayer} Order Blocks and FVGs (the smart-money layer)
-  ${l3}  → Structural confirmation — BOS / CHoCH required before entry
-  ${l4}  → Entry zone refinement — OB / FVG within the ${mpc.obLayer} zone
-  ${l5}  → Precise trigger — liquidity sweep + Market Structure Shift (MSS)
+    return `You are an elite institutional ${expertise} with 20+ years experience in SMC/ICT methodology.
+You are analysing ${label} (${sym}). ${desc}.
+Your framework: ${mpc.frameworkDesc}
 
-Key principles:
-- D1 EMA200 is a hard boundary — NEVER trade counter to it regardless of mode.
-- ${mpc.obLayer} Order Blocks and FVGs are the PRIMARY entry zones for this mode.
-- Previous Day High (PDH) and Previous Day Low (PDL) are key intraday reference levels.
-- Active symbol sessions for ${sym}:
+LAYER HIERARCHY:
+  ${l1}  → Macro bias anchor — D1 EMA200 is the ABSOLUTE directional boundary. Never trade counter to it.
+  ${l2}  → Smart-money layer — ${mpc.obLayer} Order Blocks and FVGs are the PRIMARY entry zones.
+  ${l3}  → Structural confirmation — BOS (break of structure) or CHoCH (change of character) REQUIRED.
+  ${l4}  → Entry refinement — OB/FVG within the ${mpc.obLayer} zone, confluence with Fibonacci levels.
+  ${l5}  → Entry trigger — liquidity sweep (stop hunt) followed by Market Structure Shift (MSS).
+
+SMC PRINCIPLES YOU MUST APPLY:
+1. D1 EMA200 = absolute boundary. Price above it → institutional bias is BULLISH (only longs).
+   Price below it → institutional bias is BEARISH (only shorts). No exceptions.
+2. ${mpc.obLayer} OBs and FVGs are where smart money (banks, HFTs, central banks) have live orders.
+   Price returning to an unmitigated OB in the correct direction is the highest-probability entry.
+3. PDH and PDL are key institutional reference levels — watch for sweeps and reactions at these levels.
+4. Liquidity sweeps at obvious highs/lows (equal highs, equal lows, swing points) precede the real move.
+   The sweep hunts retail stop losses, then institutional orders fill on the reversal.
+5. Equilibrium (50% of recent swing) is a valid entry for trending markets, not just premium/discount extremes.
+
+ACTIVE SESSIONS FOR ${sym}:
 ${sessionLines}
-- ${mpc.sessionNote}
-- Only trade WITH the D1 macro bias — the ${l1} layer establishes this.
-- Require BOS or CHoCH on ${mpc.bosLayer} before entry — no early entries.
+${mpc.sessionNote}
 
-Rules:
-1. Only BUY in D1 BULLISH bias when price retests ${mpc.obLayer} discount zone OB/FVG.
-2. Only SELL in D1 BEARISH bias when price retests ${mpc.obLayer} premium zone OB/FVG.
-3. Require BOS or CHoCH on ${mpc.bosLayer} before entry.
-4. ${mpc.confNote}
-5. Recommend WAIT if: D1 EMA200 blocks the direction, no ${mpc.obLayer} OB in range, ${mpc.bosLayer} has no structure break, or the session is inactive for this mode.
-6. Always give specific numeric entry, SL, and TP levels appropriate for ${sym}.
-7. ${mpc.slNote}
-8. ${mpc.rrNote}
-9. List at least 2 reasons AND at least 1 risk.
+RULES — non-negotiable:
+R1. BUY only with D1 BULLISH bias AND price in ${l2} discount/equilibrium zone.
+R2. SELL only with D1 BEARISH bias AND price in ${l2} premium/equilibrium zone.
+R3. Require BOS or CHoCH on ${mpc.bosLayer} — no early entries before structure confirms.
+R4. ${mpc.confNote}
+R5. ${mpc.slNote}
+R6. ${mpc.rrNote}
+R7. WAIT if: D1 EMA200 conflicts, no ${mpc.obLayer} OB/FVG in range, no ${mpc.bosLayer} structure break,
+    RSI is over-extended (>75 BUY / <25 SELL), or setup convergence across layers is weak.
+R8. Provide AT LEAST 2 specific reasons and AT LEAST 1 concrete risk (not generic disclaimers).
+R9. Entry, SL, and TP must be PRECISE numeric levels relevant to the current ${sym} price range.
 
-Respond ONLY with valid JSON — no prose, no markdown, no text outside the JSON object.`;
+RESPONSE FORMAT — respond ONLY with this JSON. No prose, no markdown, no text outside the JSON:
+{
+  "decision": "BUY" | "SELL" | "WAIT",
+  "confidence": <number 0-100>,
+  "entry": "<price or range string e.g. 3310-3315>",
+  "stopLoss": <number>,
+  "takeProfit": <number>,
+  "reasons": ["<reason1>", "<reason2>"],
+  "risks": ["<risk1>"]
+}`;
   }
 
-  // ─── Mode-aware user prompt ────────────────────────────────────────────────
+  // ─── Mode-aware user prompt (Sonnet 4.6 optimised) ───────────────────────
 
-  private buildPrompt(features: FeatureSet, smcSignal: SMCSignal | null, mpc: ModePromptConfig): string {
+  private buildPrompt(
+    features:               FeatureSet,
+    smcSignal:              SMCSignal | null,
+    mpc:                    ModePromptConfig,
+    confluenceBoostReasons?: string[],
+  ): string {
     const f   = features;
     const s   = f.smc;
     const m   = f.momentum;
@@ -195,77 +221,145 @@ Respond ONLY with valid JSON — no prose, no markdown, no text outside the JSON
 
     const [l1, l2, l3, l4, l5] = mpc.layers;
 
-    return `Instrument: ${f.symbol}
-Current Price: ${f.price}
+    // ── Market regime classification ─────────────────────────────────────────
+    const isD1Trending = d1.aligned;
+    const isMidTrending = h4.aligned && h1.aligned;
+    const regime =
+      isD1Trending && isMidTrending ? 'STRONG TREND'   :
+      isD1Trending                  ? 'TREND (D1 confirmed, mid-TF choppy)' :
+      isMidTrending                 ? 'DEVELOPING TREND (D1 neutral)'       :
+      'RANGING / CHOPPY';
+
+    // ── Layer convergence scoring ────────────────────────────────────────────
+    // How many of the 5 layers are aligned with the SMC signal direction?
+    const dir = smcSignal?.direction;
+    let convergence = 0;
+    if (dir) {
+      const isBull = dir === 'BUY';
+      if (isBull ? d1.direction === 'bullish' : d1.direction === 'bearish')   convergence++;
+      if (isBull ? h4.direction === 'bullish' : h4.direction === 'bearish')   convergence++;
+      if (isBull ? h1.direction === 'bullish' : h1.direction === 'bearish')   convergence++;
+      if (isBull ? m15.direction === 'bullish' : m15.direction === 'bearish') convergence++;
+      if (isBull ? m5.direction === 'bullish' : m5.direction === 'bearish')   convergence++;
+    }
+
+    // ── EMA200 macro verdict ─────────────────────────────────────────────────
+    const ema200Side = f.price > d1.ema200 ? 'ABOVE' : 'BELOW';
+    const ema200Verdict = ema200Side === 'ABOVE'
+      ? '✅ BULLISH bias — longs preferred'
+      : '✅ BEARISH bias — shorts preferred';
+
+    // ── Distance to key levels ───────────────────────────────────────────────
+    const pdhDist = (f.price - f.pdh).toFixed(2);
+    const pdlDist = (f.price - f.pdl).toFixed(2);
+
+    // ── SMC OB/FVG context ───────────────────────────────────────────────────
+    const obCtx = s.h4ObPresent
+      ? `${l2} OB at ${s.h4ObLow}–${s.h4ObHigh} (mid: ${(((s.h4ObLow??0)+(s.h4ObHigh??0))/2).toFixed(2)})`
+      : `No ${l2} OB in range`;
+    const fvgCtx = s.h4FvgPresent
+      ? `${l2} FVG at ${s.h4FvgLow}–${s.h4FvgHigh}`
+      : `No ${l2} FVG in range`;
+    const m15ObCtx  = s.obPresent  ? `${l4} OB ${s.obLow}–${s.obHigh}`  : `No ${l4} OB`;
+    const m15FvgCtx = s.fvgPresent ? `${l4} FVG ${s.fvgLow}–${s.fvgHigh}` : `No ${l4} FVG`;
+
+    // ── Confluence boosts summary ─────────────────────────────────────────────
+    const confLines = confluenceBoostReasons && confluenceBoostReasons.length > 0
+      ? confluenceBoostReasons.map(r => `  + ${r}`).join('\n')
+      : '  (no additional confluence factors)';
+
+    return `=== MARKET ANALYSIS REQUEST: ${f.symbol} ===
 Timestamp: ${f.timestamp}
-Trading Mode: ${mpc.frameworkDesc}
+Current Price: ${f.price}
+Trading Framework: ${mpc.frameworkDesc}
+Market Regime: ${regime}
+Layer Convergence: ${convergence}/5 layers aligned with ${dir ?? 'signal'} direction
 
-=== SESSION CONTEXT ===
-Session Active: ${f.inKillzone} | Current Session: ${f.killzoneName}
-Previous Day High (PDH): ${f.pdh} | Previous Day Low (PDL): ${f.pdl} | Previous Day Close (PDC): ${f.pdc}
-PDH Distance: ${(f.price - f.pdh).toFixed(2)} pts | PDL Distance: ${(f.price - f.pdl).toFixed(2)} pts
+━━━ SESSION & KEY LEVELS ━━━
+Active Session: ${f.inKillzone ? '✅ YES' : '❌ NO'} | Session: ${f.killzoneName}
+PDH: ${f.pdh} (price is ${Number(pdhDist) >= 0 ? '+' : ''}${pdhDist} from PDH)
+PDL: ${f.pdl} (price is ${Number(pdlDist) >= 0 ? '+' : ''}${pdlDist} from PDL)
+PDC: ${f.pdc}
 
-=== 5-LAYER TOP-DOWN ANALYSIS ===
+━━━ LAYER 1 — ${l1} MACRO BIAS (D1 EMA200 = hard boundary) ━━━
+Price ${f.price} is ${ema200Side} D1 EMA200 ${d1.ema200} → ${ema200Verdict}
+D1 EMA: 20=${d1.ema20} | 50=${d1.ema50} | 200=${d1.ema200}
+D1 Stack Aligned: ${d1.aligned} | D1 Direction: ${d1.direction.toUpperCase()}
+EMA200 Distance: ${d1.ema200Distance} ATR (> 3 ATR = overextended, expect reversion)
 
-[LAYER 1 — ${l1} Macro Bias (D1 EMA200 Hard Boundary)]
-Trend: ${d1.direction.toUpperCase()} | EMA20=${d1.ema20} EMA50=${d1.ema50} EMA200=${d1.ema200}
-EMAs Aligned: ${d1.aligned} | EMA200 Distance: ${d1.ema200Distance} ATR
-NOTE: This is always real D1 data regardless of trading mode — the macro anchor.
+━━━ LAYER 2 — ${l2} PRIMARY ORDER BLOCKS (smart-money layer) ━━━
+${obCtx}
+${fvgCtx}
+${l2} Zone: ${s.h4Zone.toUpperCase()} (${s.h4ZonePct}% of recent swing)
+  → PREMIUM (>55%) = ideal SELL zone | DISCOUNT (<45%) = ideal BUY zone | EQUILIBRIUM = fair value
+${l2} EMA: 20=${h4.ema20} | 50=${h4.ema50} | Direction: ${h4.direction.toUpperCase()}
 
-[LAYER 2 — ${l2} Intermediate Bias + PRIMARY ORDER BLOCKS]
-Trend: ${h4.direction.toUpperCase()} | EMA20=${h4.ema20} EMA50=${h4.ema50} | Aligned: ${h4.aligned}
-${l2} Order Block Present: ${s.h4ObPresent}${s.h4ObPresent ? ` → ${s.h4ObLow}–${s.h4ObHigh}` : ''}
-${l2} FVG Present: ${s.h4FvgPresent}${s.h4FvgPresent ? ` → ${s.h4FvgLow}–${s.h4FvgHigh}` : ''}
-${l2} Zone: ${s.h4Zone} (${s.h4ZonePct}%)
-
-[LAYER 3 — ${l3} Structural Confirmation]
-Trend: ${h1.direction.toUpperCase()} | EMA20=${h1.ema20} EMA50=${h1.ema50} EMA200=${h1.ema200}
-BOS: ${s.bos} | CHoCH: ${s.choch} | Last BOS Direction: ${s.lastBosDirection ?? 'none'}
+━━━ LAYER 3 — ${l3} STRUCTURAL CONFIRMATION ━━━
+BOS (Break of Structure): ${s.bos ? '✅ YES — trend continuation confirmed' : '❌ NO'}
+CHoCH (Change of Character): ${s.choch ? '✅ YES — potential reversal forming' : '❌ NO'}
+Last BOS Direction: ${s.lastBosDirection ?? 'none'}
 Last Swing High: ${s.lastSwingHigh ?? 'n/a'} | Last Swing Low: ${s.lastSwingLow ?? 'n/a'}
+${l3} EMA: 20=${h1.ema20} | 50=${h1.ema50} | 200=${h1.ema200} | Direction: ${h1.direction.toUpperCase()}
 
-[LAYER 4 — ${l4} Entry Zone Refinement]
-Trend: ${m15.direction.toUpperCase()} | EMA20=${m15.ema20} EMA50=${m15.ema50} | Aligned: ${m15.aligned}
-${l4} OB: ${s.obPresent}${s.obPresent ? ` (${s.obLow}–${s.obHigh})` : ''} | ${l4} FVG: ${s.fvgPresent}${s.fvgPresent ? ` (${s.fvgLow}–${s.fvgHigh})` : ''}
-${l4} Zone: ${s.zone} (${s.zonePct}%)
+━━━ LAYER 4 — ${l4} ENTRY REFINEMENT ━━━
+${m15ObCtx}
+${m15FvgCtx}
+${l4} Zone: ${s.zone.toUpperCase()} (${s.zonePct}%)
+${l4} EMA: 20=${m15.ema20} | 50=${m15.ema50} | Direction: ${m15.direction.toUpperCase()}
+Fibonacci (${l4} swing): High=${fib.swingHigh} | Low=${fib.swingLow}
+  38.2%=${fib.level382} | 50.0%=${fib.level500} | 61.8%=${fib.level618}
+  Current zone: ${fib.currentZone}
 
-[LAYER 5 — ${l5} Entry Trigger]
-Trend: ${m5.direction.toUpperCase()} | EMA20=${m5.ema20} EMA50=${m5.ema50} | Aligned: ${m5.aligned}
-Liquidity Swept: ${s.liquiditySwept}
+━━━ LAYER 5 — ${l5} ENTRY TRIGGER ━━━
+Liquidity Swept: ${s.liquiditySwept ? '✅ YES — stop hunt detected, smart money accumulating/distributing' : '❌ NO — no sweep yet'}
+${l5} EMA: 20=${m5.ema20} | 50=${m5.ema50} | Direction: ${m5.direction.toUpperCase()}
 
-=== MOMENTUM ===
-RSI(14): ${m.rsi} (${m.rsiZone}) | Slope: ${m.rsiTrend}
-Bullish Divergence: ${m.bullishDivergence} | Bearish Divergence: ${m.bearishDivergence}
-ATR(14): ${m.atr}
+━━━ MOMENTUM (RSI + Divergence) ━━━
+RSI(14): ${m.rsi.toFixed(1)} [${m.rsiZone.toUpperCase()}] | Slope: ${m.rsiTrend.toUpperCase()}
+Bullish Divergence: ${m.bullishDivergence ? '✅ YES (price lower-low + RSI higher-low = smart money absorbing)' : 'no'}
+Bearish Divergence: ${m.bearishDivergence ? '✅ YES (price higher-high + RSI lower-high = smart money distributing)' : 'no'}
+ATR(14): ${m.atr} (use for SL sizing)
 
-=== FIBONACCI (${l4} swing) ===
-Swing High: ${fib.swingHigh} | Swing Low: ${fib.swingLow}
-38.2%=${fib.level382} | 50%=${fib.level500} | 61.8%=${fib.level618}
-Current Zone: ${fib.currentZone}
+━━━ CONFLUENCE FILTERS (pre-applied) ━━━
+${confLines}
 
-=== SMC ENGINE SIGNAL (${mpc.frameworkDesc}) ===
+━━━ SMC ENGINE SIGNAL ━━━
 ${smcSignal
-  ? `Direction: ${smcSignal.direction} | Confidence: ${smcSignal.confidence}% | RR: ${smcSignal.rr}\nEntry: ${smcSignal.entryPrice} | SL: ${smcSignal.sl} | TP: ${smcSignal.tp}\nReasons: ${smcSignal.reasons.join(' | ')}`
-  : 'No clear SMC signal detected — recommend WAIT'
+  ? [
+      `Direction: ${smcSignal.direction} | Pre-AI Confidence: ${smcSignal.confidence}%`,
+      `Proposed Entry: ${smcSignal.entryPrice} | SL: ${smcSignal.sl} | TP: ${smcSignal.tp} | RR: ${smcSignal.rr}:1`,
+      `SMC reasons: ${smcSignal.reasons.join(' | ')}`,
+    ].join('\n')
+  : '⚠️  No SMC signal — algorithmic analysis found no valid setup. Evaluate if AI sees anything missed.'
 }
 
-Provide your recommendation in this EXACT JSON format:
-{
-  "decision": "BUY" | "SELL" | "WAIT",
-  "confidence": <number 0-100>,
-  "entry": "<price or range string>",
-  "stopLoss": <number>,
-  "takeProfit": <number>,
-  "reasons": ["<reason1>", "<reason2>"],
-  "risks": ["<risk1>"]
-}`;
+━━━ YOUR TASK ━━━
+Step 1 — ASSESS convergence: Do all 5 layers point the same direction as the SMC signal?
+  Are the key gates met: D1 EMA200 ✅, ${l2} OB/FVG in range ✅, ${l3} BOS/CHoCH ✅, liquidity sweep ✅?
+
+Step 2 — CHALLENGE the setup: What could invalidate this trade?
+  Is RSI overextended? Is price chopping between levels? Is this against PDH/PDL?
+  Has the ${l2} OB already been mitigated (price moved through it significantly)?
+
+Step 3 — DECIDE with your full institutional knowledge:
+  If ≥ 3/5 layers converge AND D1 EMA200 confirms AND a ${l2} OB/FVG is in range → consider entering.
+  If convergence is weak (< 3/5), or D1 macro conflicts, or no ${l2} zone present → WAIT.
+
+Step 4 — SET LEVELS precisely:
+  Entry: around current price or the OB mid-point (specify a 2-5 pt range for limit orders).
+  SL: ${mpc.slNote}
+  TP: Aim for the opposite premium/discount zone, next structural high/low, or PDH/PDL. ${mpc.rrNote}
+
+Respond ONLY with JSON — no reasoning text, no markdown outside JSON:`;
   }
 
   // ─── Main entry point ──────────────────────────────────────────────────────
 
   async analyze(
-    features: FeatureSet,
+    features:  FeatureSet,
     smcSignal: SMCSignal | null,
-    mode?: ModeConfig,
+    mode?:     ModeConfig,
+    confluenceBoostReasons?: string[],  // passed from analysis.service.ts for AI context
   ): Promise<AIRecommendation | null> {
     if (!this.apiKey) {
       // Explicit disabled state — caller decides whether to block or allow SMC fallback.
@@ -275,7 +369,7 @@ Provide your recommendation in this EXACT JSON format:
 
     const mpc    = getModePromptConfig(mode);
     const system = this.buildSystemPrompt(mpc);
-    const prompt = this.buildPrompt(features, smcSignal, mpc);
+    const prompt = this.buildPrompt(features, smcSignal, mpc, confluenceBoostReasons);
 
     this.logger.log(`AI: Sending ${mode?.label ?? 'Institutional'} analysis to ${this.model}...`);
 
@@ -287,10 +381,10 @@ Provide your recommendation in this EXACT JSON format:
       'https://api.anthropic.com/v1/messages',
       {
         model:      this.model,
-        max_tokens: 1024,
+        max_tokens: 1500,  // increased — richer prompt + chain-of-thought output
         system,
         messages: [{ role: 'user', content: prompt }],
-        temperature: 0.2,
+        temperature: 0.15, // lower = more consistent financial decisions
       },
       {
         headers: {

@@ -81,9 +81,11 @@ export class AnalysisService {
     //    modeConfig is passed so killzone detection adapts to the active mode.
     const features = this.featureEngine.compute(d1Candles, h4Candles, h1Candles, m15Candles, m5Candles, smcSignal, symbol, options?.macroCandles, options?.modeConfig);
 
-    // 3. 360° Confluence filter — EMA stack, RSI, Fibonacci, Volume
+    // 3. 360° Confluence filter — EMA stack, RSI, Fibonacci, Volume, Session
     //    Hard blocks fire here; adjustedConfidence forwarded to AI
-    const confluenceResult = this.confluence.check(smcSignal, features, h1Candles, m5Candles);
+    //    h1Candles = L3 candles (actual TF depends on mode: H1 in Inst, M15 in Precision/QS)
+    //    m5Candles = L5 candles (actual TF depends on mode: M5 in Inst, M1 in Precision/QS)
+    const confluenceResult = this.confluence.check(smcSignal, features, h1Candles, m5Candles, options?.modeConfig);
     if (!confluenceResult.pass) {
       this.logger.warn(
         `Analysis: Confluence BLOCKED [${smcSignal.direction}] — ${confluenceResult.hardBlocks.join(' | ')}`,
@@ -127,12 +129,17 @@ export class AnalysisService {
       ],
     };
 
-    // 4. AI reasoning — receives all 5-layer data + confluence context
+    // 4. AI reasoning — receives all 5-layer data + confluence context + boost reasons
+    //    Confluence boost reasons are passed to the AI so it can factor in the quantitative
+    //    checks (EMA alignment, RSI divergence, Fib confluence, volume, session quality).
     //    SAFETY: any API failure, timeout, credit exhaustion, or parse error throws here.
     //    We catch it, log AI_ERROR status, and BLOCK the signal — no SMC-only fallback.
     let recommendation: AIRecommendation | null = null;
     try {
-      recommendation = await this.aiReasoning.analyze(features, adjustedSignal, options?.modeConfig);
+      recommendation = await this.aiReasoning.analyze(
+        features, adjustedSignal, options?.modeConfig,
+        confluenceResult.boostReasons,  // pass to AI for full context
+      );
     } catch (e: any) {
       const errMsg = e?.response?.data?.error?.message ?? e?.message ?? 'Unknown AI error';
       this.logger.error(
@@ -157,7 +164,11 @@ export class AnalysisService {
       await this.logNoSignal(
         symbol, 'WAIT',
         recommendation?.reasons ?? ['AI reviewed full context and said WAIT or confidence too low'],
-        adjustedSignal.direction, recommendation?.confidence ?? adjustedSignal.confidence,
+        // Always show 'WAIT' as direction (not the SMC direction) — showing "BUY + WAIT" is
+        // confusing. The AI rejected this signal, so the outcome is WAIT regardless of SMC bias.
+        // Confidence = 0 when recommendation is null (AI validation failed); real value if AI said WAIT.
+        recommendation?.decision ?? 'WAIT',
+        recommendation?.confidence ?? 0,
       );
       return null;
     }

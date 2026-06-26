@@ -1,7 +1,9 @@
 /**
  * confluence/confluence.service.ts — 360° Multi-Confluence Filter
  * ================================================================
- * Refined scoring approach (v2): fewer hard blocks, more additive confidence.
+ * Refined scoring approach (v3): mode-aware session timing, corrected
+ * volume scaling per candle resolution, and no hard-blocks except
+ * D1 EMA200 and RSI extreme extension.
  *
  * HARD BLOCKS (pipeline stops immediately — non-negotiable):
  *   1. Price wrong side of D1 EMA200 (counter-institutional)
@@ -12,18 +14,24 @@
  *   Layer 3 — RSI Confirmation      (ideal zone +8, divergence +12, slope +4)
  *   Layer 4 — Fibonacci Confluence  (61.8% +12, 50% +8, 38.2% +5)
  *   Layer 5 — Volume Conviction     (spike ≥1.5× +10, elevated +5, thin −8)
- *   Layer 6 — Session Timing        (London-NY overlap 13–16 UTC +5)
+ *   Layer 6 — Session Timing        (mode-aware — see checkSessionTiming())
  *
- * TRADING TIERS (set TRADING_TIER in .env):
- *   1 = Aggressive  → threshold 62  → 4–6 trades/day, ~55–60% WR
- *   2 = Balanced    → threshold 74  → 2–4 trades/day, ~62–68% WR  ← default
- *   3 = Sniper      → threshold 86  → 0–2 trades/day, ~70%+ WR
+ * SESSION BONUSES BY MODE:
+ *   INSTITUTIONAL  : London-NY overlap 13–16 UTC only (+5)
+ *   PRECISION      : London open 07–10 (+8), London-NY overlap 13–16 (+10), NY 16–20 (+5)
+ *   QUICK_SCALP    : Asian 00–07 (+3), London open 07–10 (+8), mid 10–13 (+5),
+ *                    London-NY overlap 13–16 (+10), NY afternoon 16–20 (+5)
+ *
+ * VOLUME SCALING:
+ *   Baseline candle resolution is mode-dependent (h2Candles are M15 in QS, H1 in Inst).
+ *   The ratio-to-entry-candle scaling adapts so comparisons are apple-to-apple.
  */
 
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Candle, SMCSignal } from '../smc/smc.service';
 import { FeatureSet } from '../analysis/feature-engine.service';
+import { ModeConfig } from '../config/app-config.service';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -111,16 +119,18 @@ export class ConfluenceService {
   /**
    * Apply the 360° confluence filter to an SMC signal.
    *
-   * @param signal    - SMCSignal from smc.service.ts (with initial confidence)
-   * @param features  - Full FeatureSet from feature-engine.service.ts
-   * @param h1Candles - Raw H1 candles for volume baseline
-   * @param m5Candles - Raw M5 candles for recent sweep volume
+   * @param signal     - SMCSignal from smc.service.ts (with initial confidence)
+   * @param features   - Full FeatureSet from feature-engine.service.ts
+   * @param l3Candles  - Layer-3 candles for volume baseline (H1 in Institutional, M15 in Precision/QS)
+   * @param l5Candles  - Layer-5 entry candles for volume spike (M5 in Institutional, M1 in Precision/QS)
+   * @param modeConfig - Active trading mode — used for session timing and volume scaling
    */
   check(
-    signal:    SMCSignal,
-    features:  FeatureSet,
-    h1Candles: Candle[],
-    m5Candles: Candle[],
+    signal:     SMCSignal,
+    features:   FeatureSet,
+    l3Candles:  Candle[],
+    l5Candles:  Candle[],
+    modeConfig?: ModeConfig,
   ): ConfluenceResult {
     const dir   = signal.direction; // 'BUY' | 'SELL'
     const price = features.price;
@@ -152,12 +162,12 @@ export class ConfluenceService {
     boostReasons.push(...fibResult.boostReasons);
 
     // ── Layer 5: Volume ───────────────────────────────────────────────────
-    const volResult = this.checkVolume(h1Candles, m5Candles);
+    const volResult = this.checkVolume(l3Candles, l5Candles, modeConfig);
     boost += volResult.boost; // may be negative
     boostReasons.push(...volResult.boostReasons);
 
     // ── Layer 6: Session Timing ───────────────────────────────────────────
-    const sessionResult = this.checkSessionTiming();
+    const sessionResult = this.checkSessionTiming(modeConfig);
     boost += sessionResult.boost;
     boostReasons.push(...sessionResult.boostReasons);
 
@@ -448,53 +458,66 @@ export class ConfluenceService {
   // ══════════════════════════════════════════════════════════════════════════
 
   private checkVolume(
-    h1Candles: Candle[],
-    m5Candles: Candle[],
+    l3Candles:   Candle[],     // Layer-3 candles: H1 in Institutional, M15 in Precision/QS
+    l5Candles:   Candle[],     // Layer-5 entry candles: M5 in Institutional, M1 in Precision/QS
+    modeConfig?: ModeConfig,
   ): { boost: number; boostReasons: string[]; spike: boolean } {
     const boostReasons: string[] = [];
     let boost = 0;
     let spike = false;
 
-    // Baseline: avg tick volume of last 20 H1 candles
-    const h1Vol   = h1Candles.slice(-20).map(c => c.volume ?? 0);
-    const avgH1   = h1Vol.length > 0 ? h1Vol.reduce((a, b) => a + b, 0) / h1Vol.length : 0;
+    // Baseline: avg tick volume of last 20 L3 candles
+    const l3Vol    = l3Candles.slice(-20).map(c => c.volume ?? 0);
+    const avgL3    = l3Vol.length > 0 ? l3Vol.reduce((a, b) => a + b, 0) / l3Vol.length : 0;
 
-    if (avgH1 === 0) {
+    if (avgL3 === 0) {
       this.logger.debug('Volume baseline unavailable (MetaApi may return 0) — skipping volume layer');
       return { boost: 0, boostReasons: [], spike: false };
     }
 
-    // M5 scaling: 1 H1 ≈ 12 M5 candles
-    const m5Baseline = avgH1 / 12;
-    const recentM5   = m5Candles.slice(-3);
-    const maxM5Vol   = Math.max(...recentM5.map(c => c.volume ?? 0));
-    const volRatio   = m5Baseline > 0 ? maxM5Vol / m5Baseline : 0;
+    // L3→L5 ratio: how many entry candles fit inside one L3 candle
+    //   Institutional:  H1 → M5  = 12 M5 per H1
+    //   Precision:      M15 → M1 =  15 M1 per M15
+    //   Quick Scalp:    M15 → M1 =  15 M1 per M15
+    const l3ToL5Ratio =
+      modeConfig?.htfTf === 'D1' ? 12 :   // Institutional: H1 baseline / 12 = M5 equiv
+      modeConfig?.htfTf === 'H4' ? 15 :   // Precision: M15 baseline / 15 = M1 equiv
+      modeConfig?.htfTf === 'H1' ? 15 :   // Quick Scalp: M15 baseline / 15 = M1 equiv
+      12;                                   // Fallback
+
+    const l5Baseline = avgL3 / l3ToL5Ratio;
+    const recentL5   = l5Candles.slice(-3);
+    const maxL5Vol   = Math.max(...recentL5.map(c => c.volume ?? 0));
+    const volRatio   = l5Baseline > 0 ? maxL5Vol / l5Baseline : 0;
+
+    const l3Label = modeConfig?.htfTf === 'D1' ? 'H1' : 'M15';
+    const l5Label = modeConfig?.htfTf === 'D1' ? 'M5' : 'M1';
 
     this.logger.debug(
-      `Volume: H1avg=${avgH1.toFixed(0)} M5base=${m5Baseline.toFixed(0)} ` +
-      `maxM5=${maxM5Vol} ratio=${volRatio.toFixed(2)}`,
+      `Volume: ${l3Label}avg=${avgL3.toFixed(0)} ${l5Label}base=${l5Baseline.toFixed(0)} ` +
+      `max${l5Label}=${maxL5Vol} ratio=${volRatio.toFixed(2)}`,
     );
 
     if (volRatio >= 1.5) {
       boost += 10;
       spike  = true;
-      boostReasons.push(`M5 tick volume spike ${volRatio.toFixed(1)}× baseline — institutional sweep confirmed (+10)`);
+      boostReasons.push(`${l5Label} tick volume spike ${volRatio.toFixed(1)}× baseline — institutional sweep confirmed (+10)`);
     } else if (volRatio >= 1.0) {
       boost += 5;
       spike  = true;
-      boostReasons.push(`M5 tick volume elevated ${volRatio.toFixed(1)}× baseline — above-average activity (+5)`);
+      boostReasons.push(`${l5Label} tick volume elevated ${volRatio.toFixed(1)}× baseline — above-average activity (+5)`);
     } else if (volRatio > 0 && volRatio < 0.6) {
       boost -= 8;
-      boostReasons.push(`M5 tick volume thin ${volRatio.toFixed(1)}× baseline — low conviction, fake-out risk (−8)`);
+      boostReasons.push(`${l5Label} tick volume thin ${volRatio.toFixed(1)}× baseline — low conviction, fake-out risk (−8)`);
     }
 
-    // H1 rising volume (institutions defending the OB)
-    if (h1Candles.length >= 2) {
-      const last  = h1Candles[h1Candles.length - 1].volume ?? 0;
-      const prior = h1Candles[h1Candles.length - 2].volume ?? 0;
+    // L3 rising volume (institutions defending the OB)
+    if (l3Candles.length >= 2) {
+      const last  = l3Candles[l3Candles.length - 1].volume ?? 0;
+      const prior = l3Candles[l3Candles.length - 2].volume ?? 0;
       if (prior > 0 && last > prior * 1.3) {
         boost += 8;
-        boostReasons.push(`H1 volume rising (${last} vs ${prior}) — institutions defending level (+8)`);
+        boostReasons.push(`${l3Label} volume rising (${last} vs ${prior}) — institutions defending level (+8)`);
       }
     }
 
@@ -502,25 +525,67 @@ export class ConfluenceService {
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // LAYER 6 — SESSION / KILLZONE TIMING
+  // LAYER 6 — SESSION / KILLZONE TIMING  (mode-aware v3)
   // ══════════════════════════════════════════════════════════════════════════
   //
-  // London-NY overlap (13:00–16:00 UTC) is statistically the strongest
-  // window for XAUUSD: London liquidity + NY institutional volume firing
-  // simultaneously. Signals during this window get a small bonus.
+  // Session bonuses are calibrated to each mode's trading window.
   //
-  //   In London-NY overlap (13–16 UTC) : +5
+  // INSTITUTIONAL (London+NY strict):
+  //   London-NY overlap 13–16 UTC     : +5
+  //
+  // PRECISION (Extended 06–20 UTC):
+  //   London open 07–10 UTC            : +8  (clean SMC OB touches at open)
+  //   London-NY overlap 13–16 UTC      : +10 (max liquidity)
+  //   NY afternoon 16–20 UTC           : +5  (NY continuation)
+  //   Pre-London 06–07 UTC             : +3  (early positioning)
+  //
+  // QUICK SCALP (All weekday hours):
+  //   Asian session 00–07 UTC          : +3  (lower volatility, still valid)
+  //   London open 07–10 UTC            : +8  (best scalp setup window)
+  //   London mid-session 10–13 UTC     : +5
+  //   London-NY overlap 13–16 UTC      : +10 (max participation — prefer)
+  //   NY afternoon 16–20 UTC           : +5
+  //   Late NY / pre-Asian 20–00 UTC    : +2  (thin but tradeable in QS)
   // ══════════════════════════════════════════════════════════════════════════
 
-  private checkSessionTiming(): { boost: number; boostReasons: string[]; inOverlap: boolean } {
-    const utcHour = new Date().getUTCHours();
-    const inOverlap = utcHour >= 13 && utcHour < 16;
+  private checkSessionTiming(
+    modeConfig?: ModeConfig,
+  ): { boost: number; boostReasons: string[]; inOverlap: boolean } {
+    const h = new Date().getUTCHours();
 
-    if (inOverlap) {
+    // ── Quick Scalp — all weekday hours valid, session-weighted ─────────────
+    if (modeConfig?.htfTf === 'H1') {
+      if (h >= 13 && h < 16) return { boost: 10, inOverlap: true,  boostReasons: [`London-NY overlap (${h}:xx UTC) — maximum volume, best scalp momentum (+10)`] };
+      if (h >= 7  && h < 10) return { boost: 8,  inOverlap: false, boostReasons: [`London open killzone (${h}:xx UTC) — clean OB/FVG touches (+8)`] };
+      if (h >= 10 && h < 13) return { boost: 5,  inOverlap: false, boostReasons: [`London mid-session (${h}:xx UTC) — continuation flow (+5)`] };
+      if (h >= 16 && h < 20) return { boost: 5,  inOverlap: false, boostReasons: [`NY afternoon session (${h}:xx UTC) — US continuation (+5)`] };
+      if (h >= 0  && h < 7)  return { boost: 3,  inOverlap: false, boostReasons: [`Asian session (${h}:xx UTC) — lower volatility, range valid (+3)`] };
+      // 20–00 UTC: late NY / pre-Asian
+      return { boost: 2, inOverlap: false, boostReasons: [`Late NY / pre-Asian (${h}:xx UTC) — thin but valid for QS (+2)`] };
+    }
+
+    // ── Precision Scalp — extended 06:00–20:00 UTC weekdays ─────────────────
+    if (modeConfig?.htfTf === 'H4') {
+      if (h >= 13 && h < 16) return { boost: 10, inOverlap: true,  boostReasons: [`London-NY overlap (${h}:xx UTC) — maximum institutional participation (+10)`] };
+      if (h >= 7  && h < 10) return { boost: 8,  inOverlap: false, boostReasons: [`London open killzone (${h}:xx UTC) — H1 OB sweeps at their cleanest (+8)`] };
+      if (h >= 16 && h < 20) return { boost: 5,  inOverlap: false, boostReasons: [`NY afternoon session (${h}:xx UTC) — US continuation (+5)`] };
+      if (h >= 6  && h < 7)  return { boost: 3,  inOverlap: false, boostReasons: [`Pre-London (${h}:xx UTC) — early positioning (+3)`] };
+      if (h >= 10 && h < 13) return { boost: 5,  inOverlap: false, boostReasons: [`London mid-session (${h}:xx UTC) — steady flow (+5)`] };
+      // Outside 06–20: no bonus (trading is still allowed in extended mode but not preferred)
+      return { boost: 0, inOverlap: false, boostReasons: [] };
+    }
+
+    // ── Institutional — strict London + NY killzones ─────────────────────────
+    if (h >= 13 && h < 16) {
       return {
-        boost: 5,
-        boostReasons: [`London-NY overlap session (${utcHour}:xx UTC) — maximum institutional participation (+5)`],
-        inOverlap: true,
+        boost: 5, inOverlap: true,
+        boostReasons: [`London-NY overlap (${h}:xx UTC) — maximum institutional participation (+5)`],
+      };
+    }
+    if (h >= 7 && h < 10) {
+      return {
+        boost: 3, inOverlap: false,
+        boostReasons: [`London open killzone (${h}:xx UTC) — institutional order flow active (+3)`],
       };
     }
 

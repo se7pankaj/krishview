@@ -1019,7 +1019,7 @@ async function switchSymbol(symbol) {
   refreshStats();
   refreshTrades();
   refreshNews();
-  refreshConfig(); // updates tier badge only (session card already updated above)
+  refreshConfig(); // updates testMode pill only (tier badge owned by applyModeUI — not overwritten here)
 
   // 4. MetaApi trading client — sequential with 300ms gaps to avoid 429
   await refreshPrice();
@@ -1054,22 +1054,13 @@ async function refreshConfig() {
     console.error('[KrishView] /dashboard/config returned null');
     return;
   }
-  if (d.tradingTier == null || d.tierThreshold == null) {
-    console.error('[KrishView] /dashboard/config missing fields:', d);
-    return;
-  }
 
-  const tier   = d.tradingTier;
-  const thresh = d.tierThreshold;
-  const tname  = TIER_NAMES[tier] ?? `Tier${tier}`;
-
-  const badge = $('tierBadge');
-  badge.className   = `tier-badge tier-${tier}`;
-  badge.textContent = `T${tier} · ${tname} · ≥${thresh}%`;
-
+  // testMode pill is config-driven
   $('testModePill').style.display = d.testMode ? '' : 'none';
-  $('smcTierThresh').textContent  = `≥ ${thresh}%`;
-  $('smcTierLbl').textContent     = `${tname} mode`;
+
+  // Tier badge + SMC threshold are owned by applyModeUI() — do NOT overwrite here.
+  // refreshConfig() runs every 2 min and was resetting Quick Scalp/Precision back to T2 ≥74%.
+  // applyModeUI() always has the correct mode-specific values.
 
   const sym = await api('/dashboard/active-symbol');
   const h   = sym?.utcHour ?? new Date().getUTCHours();
@@ -1156,7 +1147,20 @@ async function refreshSmc() {
   const d = await api('/dashboard/smc');
   if (!d) return;
 
-  // D1
+  // SMC endpoint now returns the active mode's tier threshold and TF labels.
+  // Use these to keep tier display in sync without relying on refreshConfig().
+  if (d.tierThreshold != null) {
+    const thresh = d.tierThreshold;
+    const tierMap = { 58: { cls:'tier-1', text:`Scalp · ≥${thresh}%`, lbl:'Quick Scalp mode' },
+                      62: { cls:'tier-1', text:`T1 · Aggressive · ≥${thresh}%`, lbl:'Precision mode' },
+                      74: { cls:'tier-2', text:`T2 · Balanced · ≥${thresh}%`, lbl:'Balanced mode' } };
+    const t = tierMap[thresh] ?? { cls:'tier-2', text:`≥${thresh}%`, lbl:'Mode' };
+    const tb = $('tierBadge'); if (tb) { tb.className = `tier-badge ${t.cls}`; tb.textContent = t.text; }
+    const tt = $('smcTierThresh'); if (tt) tt.textContent = `≥ ${thresh}%`;
+    const tl = $('smcTierLbl');   if (tl) tl.textContent = t.lbl;
+  }
+
+  // Layer 1 (HTF direction)
   const bias = d.bias ?? 'NEUTRAL';
   const biasEl = $('smcD1Bias');
   biasEl.textContent = bias;
@@ -1652,7 +1656,7 @@ loadTradingMode();
 
 setInterval(fast,   10000);   // price / equity / positions every 10s
 setInterval(slow,   60000);   // candles / SMC / analysis every 60s
-setInterval(refreshConfig, 120000);
+setInterval(async () => { await refreshConfig(); await loadTradingMode(); }, 120000); // re-sync mode + testMode pill
 </script>
 </body>
 </html>
