@@ -68,12 +68,12 @@ export const TRADING_MODES: Record<TradingMode, ModeConfig> = {
   },
   MICRO_SCALP: {
     label:         'Micro Scalp',
-    description:   'H1→M15→M5→M1→M1 · ≥55% · All-day 00:00–23:59 UTC weekdays — ultra-short pyramid',
+    description:   'H1→M15→M5→M3→M1 · ≥55% · All-day 00:00–23:59 UTC weekdays — ultra-short pyramid',
     htfTf:         'H1',   // H1 = direction bias (htfTf=H1 → all-day session detection)
     h4Tf:          'M15',  // M15 = money layer / primary OBs
     confirmTf:     'M5',   // M5  = BOS / CHoCH structure confirmation
-    setupTf:       'M1',   // M1  = OB/FVG setup zone
-    entryTf:       'M1',   // M1  = entry trigger (same TF, SMC engine uses latest candles)
+    setupTf:       'M3',   // M3  = OB/FVG setup zone (distinct refinement between M5 and M1)
+    entryTf:       'M1',   // M1  = precise entry trigger
     minConfidence: 55,
     extendedHours: true,  // all-day handled by htfTf=H1 check in TradingService
   },

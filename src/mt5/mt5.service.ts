@@ -111,7 +111,7 @@ export interface BrokerServerTime {
 
 const TF_MAP: Record<string, string> = {
   D1: '1d', H4: '4h', H1: '1h', H2: '2h',
-  M30: '30m', M15: '15m', M5: '5m', M1: '1m',
+  M30: '30m', M15: '15m', M5: '5m', M3: '3m', M1: '1m',
 };
 
 @Injectable()
